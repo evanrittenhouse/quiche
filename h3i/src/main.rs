@@ -4,7 +4,7 @@ use std::time;
 use h3i::h3::actions::Action;
 use h3i::config::AppConfig;
 use h3i::h3::prompts::Prompter;
-use qlog::QlogSeq;
+use qlog::reader::QlogSeqReader;
 
 fn main() {
     env_logger::builder()
@@ -38,8 +38,15 @@ fn read_qlog(filename: &str) -> Vec<Action> {
     let mut actions = vec![];
 
     for event in qlog_reader {
-        let ac = Action::from_qlog(&event);
-        actions.extend(ac);
+        match event {
+            qlog::reader::Event::Qlog(ev) => {
+                let ac = Action::from_qlog(&ev);
+                actions.extend(ac);
+            },
+
+            qlog::reader::Event::Json(_ev) => unimplemented!(),
+        }
+
     }
 
     // println!("action = {:?}", actions);
@@ -63,79 +70,6 @@ fn prompt_frames(config: &AppConfig) -> Vec<Action> {
     }
 
     frame_actions
-}
-
-struct QlogSeqReader {
-    pub _qlog: QlogSeq,
-    reader: Box<dyn std::io::BufRead + Send + Sync>,
-}
-
-impl QlogSeqReader {
-    pub fn new(
-        mut reader: Box<dyn std::io::BufRead + Send + Sync>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        // "null record" skip it
-        Self::read_record(reader.as_mut());
-
-        let header = Self::read_record(reader.as_mut()).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "oh no!")
-        })?;
-
-        let res: Result<QlogSeq, serde_json::Error> =
-            serde_json::from_slice(&header);
-        match res {
-            Ok(qlog) => Ok(Self {
-                _qlog: qlog,
-                reader,
-            }),
-
-            Err(e) => {
-                println!("Error deserializing: {}", e);
-                println!("input value {}", String::from_utf8_lossy(&header));
-
-                Err(e.into())
-            },
-        }
-    }
-
-    fn read_record(
-        reader: &mut (dyn std::io::BufRead + Send + Sync),
-    ) -> Option<Vec<u8>> {
-        let mut buf = Vec::<u8>::new();
-        let size = reader.read_until(b'', &mut buf).unwrap();
-        if size <= 1 {
-            return None;
-        }
-
-        buf.truncate(buf.len() - 1);
-
-        Some(buf)
-    }
-}
-
-impl Iterator for QlogSeqReader {
-    type Item = qlog::events::Event;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some(bytes) = Self::read_record(&mut self.reader) {
-            let res: Result<qlog::events::Event, serde_json::Error> =
-                serde_json::from_slice(&bytes);
-
-            match res {
-                Ok(event) => {
-                    return Some(event);
-                },
-
-                Err(e) => {
-                    println!("Error deserializing: {}", e);
-                    println!("input value {}", String::from_utf8_lossy(&bytes));
-                },
-            }
-        }
-
-        None
-    }
 }
 
 /// Makes a buffered writer for a qlog.
