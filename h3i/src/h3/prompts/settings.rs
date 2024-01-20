@@ -5,7 +5,8 @@ use inquire::Text;
 use super::squish_suggester;
 use super::stream::prompt_fin_stream;
 use super::SuggestionResult;
-use crate::actions::Action;
+use crate::h3::actions::Action;
+use crate::h3::prompts;
 
 const QPACK_MAX_TABLE_CAPACITY: &str = "QPACK_MAX_TABLE_CAPACITY";
 const MAX_FIELD_SECTION_SIZE: &str = "MAX_FIELD_SECTION_SIZE";
@@ -22,7 +23,7 @@ pub struct Settings {
 }
 
 pub fn prompt_settings() -> InquireResult<Action> {
-    let stream_id = crate::prompts::prompt_control_stream_id()?;
+    let stream_id = prompts::prompt_control_stream_id()?;
     let raw = settings_read_loop();
 
     let fin_stream = prompt_fin_stream()?;
@@ -78,7 +79,7 @@ fn settings_read_loop() -> RawSettings {
         };
 
         let value = Text::new("setting value:")
-            .with_validator(crate::prompts::validate_varint)
+            .with_validator(prompts::validate_varint)
             .prompt()
             .expect("An error happened, stopping.")
             .parse::<u64>()
@@ -102,7 +103,7 @@ fn validate_setting_type(id: &str) -> SuggestionResult<Validation> {
         return Ok(Validation::Valid);
     }
 
-    crate::prompts::validate_varint(id)
+    prompts::validate_varint(id)
 }
 
 fn settings_type_suggestor(val: &str) -> SuggestionResult<Vec<String>> {

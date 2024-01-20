@@ -4,6 +4,7 @@ use inquire::CustomUserError;
 use inquire::Select;
 use inquire::Text;
 
+use crate::h3::prompts;
 use crate::StreamIdAllocator;
 
 use super::SuggestionResult;
@@ -65,7 +66,7 @@ fn validate_stream_id(id: &str) -> SuggestionResult<Validation> {
         return Ok(Validation::Valid);
     }
 
-    crate::prompts::validate_varint(id)
+    prompts::validate_varint(id)
 }
 
 pub fn autopick_stream_id(
@@ -142,7 +143,7 @@ impl StreamShutdown {
 }
 
 pub fn prompt_shutdown_stream() -> InquireResult<(u64, String, u64)> {
-    let id = crate::prompts::prompt_stream_id()?;
+    let id = prompts::prompt_stream_id()?;
 
     let trans_or_app = prompt_transport_or_app()?;
 
@@ -245,7 +246,7 @@ fn validate_transport_error_code(
         return Ok(Validation::Valid);
     }
 
-    crate::prompts::validate_varint(id)
+    prompts::validate_varint(id)
 }
 
 fn transport_error_code_suggestor(
@@ -303,7 +304,7 @@ fn validate_h3_error_code(id: &str) -> SuggestionResult<Validation> {
         return Ok(Validation::Valid);
     }
 
-    crate::prompts::validate_varint(id)
+    prompts::validate_varint(id)
 }
 
 fn h3_error_code_suggestor(val: &str) -> SuggestionResult<Vec<String>> {

@@ -5,9 +5,10 @@ use inquire::validator::Validation;
 use inquire::InquireError;
 use inquire::Text;
 
-use crate::actions::Action;
+use crate::h3::actions::Action;
 use crate::config::AppConfig;
 use crate::StreamIdAllocator;
+use crate::h3::prompts;
 
 use std::sync::OnceLock;
 
@@ -334,7 +335,7 @@ fn prompt_stream_id() -> InquireResult<u64> {
 
 fn prompt_control_stream_id() -> InquireResult<u64> {
     let id = Text::new("stream ID:")
-        .with_validator(crate::prompts::validate_varint)
+        .with_validator(prompts::validate_varint)
         .with_autocomplete(&control_stream_suggestor)
         .prompt()?;
 
@@ -344,7 +345,7 @@ fn prompt_control_stream_id() -> InquireResult<u64> {
 
 fn prompt_varint(str: &str) -> InquireResult<u64> {
     let id = Text::new(str)
-        .with_validator(crate::prompts::validate_varint)
+        .with_validator(prompts::validate_varint)
         .prompt()?;
 
     // id is already validated so unwrap always succeeds
@@ -358,7 +359,7 @@ fn control_stream_suggestor(val: &str) -> SuggestionResult<Vec<String>> {
 }
 
 pub fn prompt_data() -> InquireResult<Action> {
-    let stream_id = crate::prompts::prompt_stream_id()?;
+    let stream_id = prompts::prompt_stream_id()?;
 
     let payload = Text::new("payload:").prompt()?;
 
@@ -376,8 +377,8 @@ pub fn prompt_data() -> InquireResult<Action> {
 }
 
 pub fn prompt_max_push_id() -> InquireResult<Action> {
-    let stream_id = crate::prompts::prompt_stream_id()?;
-    let push_id = crate::prompts::prompt_varint("push ID:")?;
+    let stream_id = prompts::prompt_stream_id()?;
+    let push_id = prompts::prompt_varint("push ID:")?;
 
     let fin_stream = prompt_fin_stream()?;
 
@@ -391,8 +392,8 @@ pub fn prompt_max_push_id() -> InquireResult<Action> {
 }
 
 pub fn prompt_cancel_push() -> InquireResult<Action> {
-    let stream_id = crate::prompts::prompt_stream_id()?;
-    let push_id = crate::prompts::prompt_varint("push ID:")?;
+    let stream_id = prompts::prompt_stream_id()?;
+    let push_id = prompts::prompt_varint("push ID:")?;
 
     let fin_stream = prompt_fin_stream()?;
 
@@ -406,8 +407,8 @@ pub fn prompt_cancel_push() -> InquireResult<Action> {
 }
 
 pub fn prompt_goaway() -> InquireResult<Action> {
-    let stream_id = crate::prompts::prompt_stream_id()?;
-    let id = crate::prompts::prompt_varint("ID:")?;
+    let stream_id = prompts::prompt_stream_id()?;
+    let id = prompts::prompt_varint("ID:")?;
 
     let fin_stream = prompt_fin_stream()?;
 
@@ -421,7 +422,7 @@ pub fn prompt_goaway() -> InquireResult<Action> {
 }
 
 pub fn prompt_grease() -> InquireResult<Action> {
-    let stream_id = crate::prompts::prompt_control_stream_id()?;
+    let stream_id = prompts::prompt_control_stream_id()?;
     let raw_type = quiche::h3::grease_value();
     let payload = Text::new("payload:")
         .prompt()
@@ -442,8 +443,8 @@ pub fn prompt_grease() -> InquireResult<Action> {
 }
 
 pub fn prompt_extension() -> InquireResult<Action> {
-    let stream_id = crate::prompts::prompt_control_stream_id()?;
-    let raw_type = crate::prompts::prompt_varint("frame type:")?;
+    let stream_id = prompts::prompt_control_stream_id()?;
+    let raw_type = prompts::prompt_varint("frame type:")?;
     let payload = Text::new("payload:")
         .prompt()
         .expect("An error happened when asking for payload, try again later.");

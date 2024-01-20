@@ -84,8 +84,7 @@ fn dummy_packet_with_stream_frame(
     }))
 }
 
-pub mod actions;
+pub mod h3;
 pub mod client;
 pub mod config;
-pub mod prompts;
 mod tlv;

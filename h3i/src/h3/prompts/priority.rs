@@ -3,17 +3,18 @@ use inquire::Select;
 use inquire::Text;
 
 use super::stream::prompt_fin_stream;
-use crate::actions::Action;
+use crate::h3::actions::Action;
+use crate::h3::prompts;
 
 const REQUEST: &str = "request";
 const PUSH: &str = "push";
 
 pub fn prompt_priority() -> InquireResult<Action> {
-    let stream_id = crate::prompts::prompt_stream_id()?;
+    let stream_id = prompts::prompt_stream_id()?;
 
     let ty = prompt_request_or_push()?;
     let prioritized_element_id =
-        crate::prompts::prompt_varint("Prioritized Element ID:")?;
+        prompts::prompt_varint("Prioritized Element ID:")?;
 
     let priority_field_value = Text::new("priority field value:").prompt()?;
 

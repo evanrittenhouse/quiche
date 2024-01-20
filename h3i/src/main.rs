@@ -1,9 +1,9 @@
 use std::io::BufReader;
 use std::time;
 
-use h3i::actions::Action;
+use h3i::h3::actions::Action;
 use h3i::config::AppConfig;
-use h3i::prompts::Prompter;
+use h3i::h3::prompts::Prompter;
 use qlog::QlogSeq;
 
 fn main() {

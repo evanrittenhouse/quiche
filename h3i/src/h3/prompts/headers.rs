@@ -4,12 +4,13 @@ use inquire::Text;
 
 use crate::encode_header_block;
 use crate::StreamIdAllocator;
+use crate::h3;
 
 use super::squish_suggester;
 use super::stream::prompt_fin_stream;
 use super::SuggestionResult;
 use super::HOST_PORT;
-use crate::actions::Action;
+use crate::h3::actions::Action;
 
 pub fn prompt_headers(
     sid_alloc: &mut StreamIdAllocator, raw: bool,
@@ -126,5 +127,5 @@ fn validate_stream_id(id: &str) -> SuggestionResult<Validation> {
         return Ok(Validation::Valid);
     }
 
-    crate::prompts::validate_varint(id)
+    h3::prompts::validate_varint(id)
 }

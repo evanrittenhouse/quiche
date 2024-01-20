@@ -4,7 +4,7 @@ use qlog::events::h3::H3FrameParsed;
 use qlog::events::h3::Http3Frame;
 use qlog::events::EventData;
 
-use crate::actions::Action;
+use crate::h3::actions::Action;
 use crate::config::AppConfig;
 use crate::tlv::VarintTlv;
 
