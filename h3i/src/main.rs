@@ -63,8 +63,8 @@ fn prompt_frames(config: &AppConfig) -> Vec<Action> {
         let mut streamer = make_streamer(std::boxed::Box::new(writer));
 
         for action in &frame_actions {
-            for ev in action.to_qlog() {
-                streamer.add_event_data_now(ev).ok();
+            for (ev, ex) in action.to_qlog() {
+                streamer.add_event_data_ex_now(ev, ex).ok();
             }
         }
     }

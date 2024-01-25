@@ -415,13 +415,13 @@ where
                 let mut b = octets::OctetsMut::with_slice(&mut d);
 
                 if let Some(s) = conn.qlog_streamer() {
-                    for ev in action.to_qlog() {
+                    for (ev, ex) in action.to_qlog() {
                         // skip dummy packet
                         if matches!(ev, EventData::PacketSent(..)) {
                             continue;
                         }
 
-                        s.add_event_data_now(ev).ok();
+                        s.add_event_data_ex_now(ev, ex).ok();
                     }
                 }
                 let len = frame.to_bytes(&mut b).unwrap();
@@ -445,13 +445,13 @@ where
                 let mut b = octets::OctetsMut::with_slice(&mut d);
 
                 if let Some(s) = conn.qlog_streamer() {
-                    for ev in action.to_qlog() {
+                    for (ev, ex) in action.to_qlog() {
                         // skip dummy packet
                         if matches!(ev, EventData::PacketSent(..)) {
                             continue;
                         }
 
-                        s.add_event_data_now(ev).ok();
+                        s.add_event_data_ex_now(ev, ex).ok();
                     }
                 }
                 let len = frame.to_bytes(&mut b).unwrap();

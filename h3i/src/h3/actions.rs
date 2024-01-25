@@ -1,9 +1,13 @@
+use std::collections::BTreeMap;
+
 use qlog::events::h3::H3FrameCreated;
 use qlog::events::h3::Http3Frame;
 use qlog::events::quic::QuicFrame;
 use qlog::events::Event;
 use qlog::events::EventData;
+use qlog::events::ExData;
 use quiche::h3::NameValue;
+use serde_json::json;
 
 use crate::dummy_packet_with_stream_frame;
 use crate::encode_header_block;
@@ -43,7 +47,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub fn to_qlog(&self) -> Vec<EventData> {
+    pub fn to_qlog(&self) -> Vec<(EventData, ExData)> {
         match self {
             Action::SendFrame {
                 stream_id,
@@ -57,15 +61,13 @@ impl Action {
                     raw: None,
                 });
 
-                let mut ret = vec![frame_ev];
+                let mut ex = BTreeMap::new();
 
-                if let Some(dummy) =
-                    dummy_packet_with_stream_frame(*stream_id, *fin_stream)
-                {
-                    ret.push(dummy)
+                if *fin_stream {
+                    ex.insert("fin_stream".to_string(), json!(true));
                 }
 
-                ret
+                vec![(frame_ev, ex)]
             },
 
             Action::SendHeadersFrame {
@@ -93,15 +95,13 @@ impl Action {
                     raw: None,
                 });
 
-                let mut ret = vec![frame_ev];
+                let mut ex = BTreeMap::new();
 
-                if let Some(dummy) =
-                    dummy_packet_with_stream_frame(*stream_id, *fin_stream)
-                {
-                    ret.push(dummy)
+                if *fin_stream {
+                    ex.insert("fin_stream".to_string(), json!(true));
                 }
 
-                ret
+                vec![(frame_ev, ex)]
             },
 
             Action::StreamBytes {
@@ -112,7 +112,7 @@ impl Action {
                 if let Some(dummy) =
                     dummy_packet_with_stream_frame(*stream_id, *fin_stream)
                 {
-                    vec![dummy]
+                    vec![(dummy, BTreeMap::new())]
                 } else {
                     vec![]
                 }
@@ -153,6 +153,8 @@ impl Action {
 
             EventData::H3FrameCreated(fc) => match &fc.frame {
                 Http3Frame::Headers { headers } => {
+                    let fin_stream = event.ex_data["fin_stream"].as_bool().unwrap_or_default();
+
                     let hdrs: Vec<quiche::h3::Header> = headers
                         .iter()
                         .map(|h| {
@@ -165,7 +167,7 @@ impl Action {
                     let header_block = encode_header_block(&hdrs).unwrap();
                     actions.push(Action::SendHeadersFrame {
                         stream_id: fc.stream_id,
-                        fin_stream: false,
+                        fin_stream,
                         headers: hdrs,
                         frame: quiche::h3::frame::Frame::Headers { header_block },
                     });
