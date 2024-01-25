@@ -4,6 +4,7 @@ use inquire::CustomUserError;
 use inquire::Select;
 use inquire::Text;
 
+use crate::h3::actions::Action;
 use crate::h3::prompts;
 use crate::StreamIdAllocator;
 
@@ -91,7 +92,7 @@ pub fn autopick_stream_id(
 
 pub fn prompt_open_uni_stream(
     sid_alloc: &mut StreamIdAllocator,
-) -> InquireResult<(u64, u64, bool)> {
+) -> InquireResult<Action> {
     let stream_id = autopick_stream_id(sid_alloc)?;
     let stream_type = Select::new("stream type:", vec![
         CONTROL_STREAM,
@@ -111,8 +112,18 @@ pub fn prompt_open_uni_stream(
     };
 
     let fin_stream = prompt_fin_stream()?;
+    println!("open uni stream_id={} ty={}", stream_id, ty);
 
-    Ok((stream_id, ty, fin_stream))
+    let mut d = [42; 8];
+    let mut b = octets::OctetsMut::with_slice(&mut d);
+    b.put_varint(ty).unwrap();
+    let off = b.off();
+
+    Ok(Action::StreamBytes {
+        stream_id,
+        bytes: d[..off].to_vec(),
+        fin_stream,
+    })
 }
 
 pub fn prompt_fin_stream() -> InquireResult<bool> {
@@ -130,24 +141,35 @@ pub struct StreamShutdown {
     pub error_code: u64,
 }
 
-impl StreamShutdown {
-    pub fn prompt() -> InquireResult<Self> {
-        let (stream_id, trans_or_app, error_code) = prompt_shutdown_stream()?;
+impl StreamShutdown {}
 
-        Ok(Self {
-            stream_id,
-            transport: trans_or_app.as_str() == TRANSPORT,
-            error_code,
-        })
-    }
+pub fn prompt_reset_stream() -> InquireResult<Action> {
+    let (stream_id, transport, error_code) = prompt_close_stream()?;
+
+    Ok(Action::ResetStream {
+        stream_id,
+        transport,
+        error_code,
+    })
 }
 
-pub fn prompt_shutdown_stream() -> InquireResult<(u64, String, u64)> {
+pub fn prompt_stop_sending() -> InquireResult<Action> {
+    let (stream_id, transport, error_code) = prompt_close_stream()?;
+
+    Ok(Action::StopSending {
+        stream_id,
+        transport,
+        error_code,
+    })
+}
+
+fn prompt_close_stream() -> InquireResult<(u64, bool, u64)> {
     let id = prompts::prompt_stream_id()?;
 
     let trans_or_app = prompt_transport_or_app()?;
+    let transport = trans_or_app == TRANSPORT;
 
-    let error_code = if trans_or_app == TRANSPORT {
+    let error_code = if transport {
         let error_code = Text::new("error code:")
             .with_validator(validate_transport_error_code)
             .with_autocomplete(&transport_error_code_suggestor)
@@ -208,7 +230,7 @@ pub fn prompt_shutdown_stream() -> InquireResult<(u64, String, u64)> {
         }
     };
 
-    Ok((id, trans_or_app, error_code))
+    Ok((id, transport, error_code))
 }
 
 fn prompt_transport_or_app() -> InquireResult<String> {

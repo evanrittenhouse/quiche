@@ -479,15 +479,16 @@ where
                 error_code,
             } => {
                 println!(
-                    "reset stream id={} transport={} error_code={}",
+                    "reset_stream stream_id={} transport={} error_code={}",
                     stream_id, transport, error_code
                 );
-                conn.stream_shutdown(
+                if let Err(e) = conn.stream_shutdown(
                     *stream_id,
                     quiche::Shutdown::Write,
                     *error_code,
-                )
-                .unwrap();
+                ) {
+                    println!("can't send reset_stream: {}", e);
+                }
             },
 
             Action::StopSending {
@@ -496,15 +497,17 @@ where
                 error_code,
             } => {
                 println!(
-                    "stop sending stream id={} transport={} error_code={}",
+                    "stop_sending stream id={} transport={} error_code={}",
                     stream_id, transport, error_code
                 );
-                conn.stream_shutdown(
+
+                if let Err(e) = conn.stream_shutdown(
                     *stream_id,
                     quiche::Shutdown::Read,
                     *error_code,
-                )
-                .unwrap();
+                ) {
+                    println!("can't send stop_sending: {}", e);
+                }
             },
         }
     }

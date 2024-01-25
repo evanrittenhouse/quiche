@@ -134,21 +134,7 @@ impl Prompter {
                 OPEN_UNI_STREAM =>
                     match stream::prompt_open_uni_stream(&mut self.uni_sid_alloc)
                     {
-                        Ok((stream_id, ty, fin_stream)) => {
-                            println!(
-                                "open uni stream_id={} ty={}",
-                                stream_id, ty
-                            );
-                            let mut d = [42; 8];
-                            let mut b = octets::OctetsMut::with_slice(&mut d);
-                            b.put_varint(ty).unwrap();
-                            let off = b.off();
-                            actions.push(Action::StreamBytes {
-                                stream_id,
-                                bytes: d[..off].to_vec(),
-                                fin_stream,
-                            })
-                        },
+                        Ok(action) => actions.push(action),
                         Err(e) =>
                             if handle_action_loop_error(e) {
                                 return actions;
@@ -156,12 +142,8 @@ impl Prompter {
                                 continue;
                             },
                     },
-                RESET_STREAM => match stream::StreamShutdown::prompt() {
-                    Ok(reset) => actions.push(Action::ResetStream {
-                        stream_id: reset.stream_id,
-                        transport: reset.transport,
-                        error_code: reset.error_code,
-                    }),
+                RESET_STREAM => match stream::prompt_reset_stream() {
+                    Ok(action) => actions.push(action),
                     Err(e) =>
                         if handle_action_loop_error(e) {
                             return actions;
@@ -169,12 +151,8 @@ impl Prompter {
                             continue;
                         },
                 },
-                STOP_SENDING => match stream::StreamShutdown::prompt() {
-                    Ok(stop) => actions.push(Action::StopSending {
-                        stream_id: stop.stream_id,
-                        transport: stop.transport,
-                        error_code: stop.error_code,
-                    }),
+                STOP_SENDING => match stream::prompt_stop_sending() {
+                    Ok(action) => actions.push(action),
                     Err(e) =>
                         if handle_action_loop_error(e) {
                             return actions;
