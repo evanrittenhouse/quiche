@@ -84,7 +84,7 @@ fn dummy_packet_with_stream_frame(
     }))
 }
 
-pub mod h3;
 pub mod client;
 pub mod config;
+pub mod h3;
 mod tlv;

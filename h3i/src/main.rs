@@ -1,8 +1,8 @@
 use std::io::BufReader;
 use std::time;
 
-use h3i::h3::actions::Action;
 use h3i::config::AppConfig;
+use h3i::h3::actions::Action;
 use h3i::h3::prompts::Prompter;
 use qlog::reader::QlogSeqReader;
 
@@ -46,7 +46,6 @@ fn read_qlog(filename: &str) -> Vec<Action> {
 
             qlog::reader::Event::Json(_ev) => unimplemented!(),
         }
-
     }
 
     // println!("action = {:?}", actions);

@@ -4,8 +4,8 @@ use qlog::events::h3::H3FrameParsed;
 use qlog::events::h3::Http3Frame;
 use qlog::events::EventData;
 
-use crate::h3::actions::Action;
 use crate::config::AppConfig;
+use crate::h3::actions::Action;
 use crate::tlv::VarintTlv;
 
 use quiche::h3::NameValue;
@@ -186,7 +186,7 @@ pub fn connect(
         // has expired, so handle it without attempting to read packets. We
         // will then proceed with the send loop.
         if events.is_empty() {
-            //println!("timed out");
+            // println!("timed out");
 
             conn.on_timeout();
         }
@@ -473,14 +473,38 @@ where
                 conn.stream_send(*stream_id, bytes, *fin_stream).unwrap();
             },
 
-            Action::ResetStream { stream_id, transport, error_code } => {
-                println!("reset stream id={} transport={} error_code={}", stream_id, transport, error_code);
-                conn.stream_shutdown(*stream_id, quiche::Shutdown::Write, *error_code).unwrap();
+            Action::ResetStream {
+                stream_id,
+                transport,
+                error_code,
+            } => {
+                println!(
+                    "reset stream id={} transport={} error_code={}",
+                    stream_id, transport, error_code
+                );
+                conn.stream_shutdown(
+                    *stream_id,
+                    quiche::Shutdown::Write,
+                    *error_code,
+                )
+                .unwrap();
             },
 
-            Action::StopSending { stream_id, transport, error_code } => {
-                println!("stop sending stream id={} transport={} error_code={}", stream_id, transport, error_code);
-                conn.stream_shutdown(*stream_id, quiche::Shutdown::Read, *error_code).unwrap();
+            Action::StopSending {
+                stream_id,
+                transport,
+                error_code,
+            } => {
+                println!(
+                    "stop sending stream id={} transport={} error_code={}",
+                    stream_id, transport, error_code
+                );
+                conn.stream_shutdown(
+                    *stream_id,
+                    quiche::Shutdown::Read,
+                    *error_code,
+                )
+                .unwrap();
             },
         }
     }
