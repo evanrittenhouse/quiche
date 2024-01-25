@@ -1,10 +1,12 @@
 use inquire::error::InquireResult;
 use inquire::validator::Validation;
 use inquire::Text;
+use quiche::h3::frame::Frame;
 
 use crate::encode_header_block;
-use crate::StreamIdAllocator;
 use crate::h3;
+use crate::h3::prompts;
+use crate::StreamIdAllocator;
 
 use super::squish_suggester;
 use super::stream::prompt_fin_stream;
@@ -49,7 +51,32 @@ pub fn prompt_headers(
         stream_id,
         fin_stream,
         headers,
-        frame: quiche::h3::frame::Frame::Headers { header_block },
+        frame: Frame::Headers { header_block },
+    };
+
+    Ok(action)
+}
+
+pub fn prompt_push_promise() -> InquireResult<Action> {
+    let stream_id = prompts::prompt_stream_id()?;
+    let push_id = prompts::prompt_varint("push ID:")?;
+
+    let headers = headers_read_loop()?;
+    let header_block = if headers.is_empty() {
+        vec![]
+    } else {
+        encode_header_block(&headers).unwrap()
+    };
+
+    let fin_stream = prompt_fin_stream()?;
+
+    let action = Action::SendFrame {
+        stream_id,
+        fin_stream,
+        frame: Frame::PushPromise {
+            push_id,
+            header_block,
+        },
     };
 
     Ok(action)

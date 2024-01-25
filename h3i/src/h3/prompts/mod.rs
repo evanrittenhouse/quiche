@@ -5,10 +5,11 @@ use inquire::validator::Validation;
 use inquire::InquireError;
 use inquire::Text;
 
-use crate::h3::actions::Action;
 use crate::config::AppConfig;
-use crate::StreamIdAllocator;
+use crate::h3::actions::Action;
 use crate::h3::prompts;
+use crate::h3::prompts::headers::prompt_push_promise;
+use crate::StreamIdAllocator;
 
 use std::sync::OnceLock;
 
@@ -45,6 +46,7 @@ const HEADERS: &str = "headers";
 const HEADERS_RAW: &str = "headers_raw";
 const DATA: &str = "data";
 const SETTINGS: &str = "settings";
+const PUSH_PROMISE: &str = "push_promise";
 const CANCEL_PUSH: &str = "cancel_push";
 const GOAWAY: &str = "goaway";
 const MAX_PUSH_ID: &str = "max_push_id";
@@ -155,9 +157,11 @@ impl Prompter {
                             },
                     },
                 RESET_STREAM => match stream::StreamShutdown::prompt() {
-                    Ok(reset) => {
-                        actions.push(Action::ResetStream { stream_id: reset.stream_id, transport: reset.transport, error_code: reset.error_code })
-                    },
+                    Ok(reset) => actions.push(Action::ResetStream {
+                        stream_id: reset.stream_id,
+                        transport: reset.transport,
+                        error_code: reset.error_code,
+                    }),
                     Err(e) =>
                         if handle_action_loop_error(e) {
                             return actions;
@@ -166,9 +170,11 @@ impl Prompter {
                         },
                 },
                 STOP_SENDING => match stream::StreamShutdown::prompt() {
-                    Ok(stop) => {
-                        actions.push(Action::StopSending { stream_id: stop.stream_id, transport: stop.transport, error_code: stop.error_code })
-                    },
+                    Ok(stop) => actions.push(Action::StopSending {
+                        stream_id: stop.stream_id,
+                        transport: stop.transport,
+                        error_code: stop.error_code,
+                    }),
                     Err(e) =>
                         if handle_action_loop_error(e) {
                             return actions;
@@ -235,6 +241,18 @@ impl Prompter {
                         },
                 },
 
+                PUSH_PROMISE => match prompt_push_promise() {
+                    Ok(action) => {
+                        actions.push(action);
+                    },
+                    Err(e) =>
+                        if handle_action_loop_error(e) {
+                            return actions;
+                        } else {
+                            continue;
+                        },
+                },
+
                 PRIORITY_UPDATE => match priority::prompt_priority() {
                     Ok(action) => {
                         actions.push(action);
@@ -283,16 +301,17 @@ fn action_suggester(val: &str) -> SuggestionResult<Vec<String>> {
         HEADERS,
         HEADERS_RAW,
         DATA,
+        OPEN_UNI_STREAM,
         SETTINGS,
-        CANCEL_PUSH,
         GOAWAY,
-        MAX_PUSH_ID,
         PRIORITY_UPDATE,
         GREASE,
         EXTENSION,
-        OPEN_UNI_STREAM,
         RESET_STREAM,
         STOP_SENDING,
+        PUSH_PROMISE,
+        CANCEL_PUSH,
+        MAX_PUSH_ID,
         FLUSH,
         QUIT,
     ];
