@@ -1,2 +1,2 @@
-pub mod prompts;
 pub mod actions;
+pub mod prompts;

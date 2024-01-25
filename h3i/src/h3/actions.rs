@@ -6,6 +6,7 @@ use qlog::events::quic::QuicFrame;
 use qlog::events::Event;
 use qlog::events::EventData;
 use qlog::events::ExData;
+use quiche::h3::frame::Frame;
 use quiche::h3::NameValue;
 use serde_json::json;
 
@@ -17,14 +18,14 @@ pub enum Action {
     SendFrame {
         stream_id: u64,
         fin_stream: bool,
-        frame: quiche::h3::frame::Frame,
+        frame: Frame,
     },
 
     SendHeadersFrame {
         stream_id: u64,
         fin_stream: bool,
         headers: Vec<quiche::h3::Header>,
-        frame: quiche::h3::frame::Frame,
+        frame: Frame,
     },
 
     StreamBytes {
@@ -151,29 +152,83 @@ impl Action {
                 }
             },
 
-            EventData::H3FrameCreated(fc) => match &fc.frame {
-                Http3Frame::Headers { headers } => {
-                    let fin_stream = event.ex_data["fin_stream"].as_bool().unwrap_or_default();
+            EventData::H3FrameCreated(fc) => {
+                let stream_id = fc.stream_id;
+                let fin_stream = event
+                    .ex_data
+                    .get("fin_stream")
+                    .unwrap_or(&serde_json::Value::Null)
+                    .as_bool()
+                    .unwrap_or_default();
 
-                    let hdrs: Vec<quiche::h3::Header> = headers
-                        .iter()
-                        .map(|h| {
-                            quiche::h3::Header::new(
-                                h.name.as_bytes(),
-                                h.value.as_bytes(),
-                            )
+                match &fc.frame {
+                    Http3Frame::Settings { settings } => {
+                        let mut raw_settings = vec![];
+                        // This is ugly but it reflects ambiguity in the qlog
+                        // specs.
+                        for s in settings {
+                            match s.name.as_str() {
+                                "MAX_FIELD_SECTION_SIZE" =>
+                                    raw_settings.push((0x6, s.value)),
+                                "QPACK_MAX_TABLE_CAPACITY" =>
+                                    raw_settings.push((0x1, s.value)),
+                                "QPACK_BLOCKED_STREAMS" =>
+                                    raw_settings.push((0x7, s.value)),
+                                "SETTINGS_ENABLE_CONNECT_PROTOCOL" =>
+                                    raw_settings.push((0x8, s.value)),
+                                "H3_DATAGRAM" =>
+                                    raw_settings.push((0x33, s.value)),
+
+                                _ =>
+                                    if let Ok(ty) = s.name.parse::<u64>() {
+                                        raw_settings.push((ty, s.value));
+                                    },
+                            }
+                        }
+                        actions.push(Action::SendFrame {
+                            stream_id,
+                            fin_stream,
+                            frame: Frame::Settings {
+                                max_field_section_size: None,
+                                qpack_max_table_capacity: None,
+                                qpack_blocked_streams: None,
+                                connect_protocol_enabled: None,
+                                h3_datagram: None,
+                                grease: None,
+                                raw: Some(raw_settings),
+                            },
                         })
-                        .collect();
-                    let header_block = encode_header_block(&hdrs).unwrap();
-                    actions.push(Action::SendHeadersFrame {
-                        stream_id: fc.stream_id,
-                        fin_stream,
-                        headers: hdrs,
-                        frame: quiche::h3::frame::Frame::Headers { header_block },
-                    });
-                },
+                    },
 
-                _ => (),
+                    Http3Frame::Headers { headers } => {
+                        let hdrs: Vec<quiche::h3::Header> = headers
+                            .iter()
+                            .map(|h| {
+                                quiche::h3::Header::new(
+                                    h.name.as_bytes(),
+                                    h.value.as_bytes(),
+                                )
+                            })
+                            .collect();
+                        let header_block = encode_header_block(&hdrs).unwrap();
+                        actions.push(Action::SendHeadersFrame {
+                            stream_id,
+                            fin_stream,
+                            headers: hdrs,
+                            frame: Frame::Headers { header_block },
+                        });
+                    },
+
+                    Http3Frame::Goaway { id } => {
+                        actions.push(Action::SendFrame {
+                            stream_id,
+                            fin_stream,
+                            frame: Frame::GoAway { id: *id },
+                        });
+                    },
+
+                    _ => unimplemented!(),
+                }
             },
             _ => (),
         }
