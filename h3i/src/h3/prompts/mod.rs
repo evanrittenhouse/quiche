@@ -59,8 +59,14 @@ const STOP_SENDING: &str = "stop_sending";
 const FLUSH: &str = "flush";
 const QUIT: &str = "quit";
 
+enum PromptOutcome {
+    Action(Action),
+    Repeat,
+    Flush,
+    Clear,
+}
+
 pub struct Prompter {
-    // config: AppConfig
     bidi_sid_alloc: StreamIdAllocator,
     uni_sid_alloc: StreamIdAllocator,
 }
@@ -72,6 +78,46 @@ impl Prompter {
         Self {
             bidi_sid_alloc: StreamIdAllocator { id: 0 },
             uni_sid_alloc: StreamIdAllocator { id: 2 },
+        }
+    }
+
+    fn foo(&mut self, action: &str) -> PromptOutcome {
+        let res = match action {
+            HEADERS | HEADERS_RAW => {
+                let raw = action == HEADERS_RAW;
+                headers::prompt_headers(&mut self.bidi_sid_alloc, raw)
+            },
+
+            DATA => prompt_data(),
+            SETTINGS => settings::prompt_settings(),
+            OPEN_UNI_STREAM =>
+                stream::prompt_open_uni_stream(&mut self.uni_sid_alloc),
+            RESET_STREAM => stream::prompt_reset_stream(),
+            STOP_SENDING => stream::prompt_stop_sending(),
+            GREASE => prompt_grease(),
+            EXTENSION => prompt_extension(),
+            GOAWAY => prompt_goaway(),
+            MAX_PUSH_ID => prompt_max_push_id(),
+            CANCEL_PUSH => prompt_cancel_push(),
+            PUSH_PROMISE => prompt_push_promise(),
+            PRIORITY_UPDATE => priority::prompt_priority(),
+            FLUSH => return PromptOutcome::Flush,
+            QUIT => return PromptOutcome::Clear,
+
+            _ => {
+                println!("error: unknown action {}", action);
+                return PromptOutcome::Repeat;
+            },
+        };
+
+        match res {
+            Ok(action) => PromptOutcome::Action(action),
+            Err(e) =>
+                if handle_action_loop_error(e) {
+                    PromptOutcome::Flush
+                } else {
+                    PromptOutcome::Repeat
+                },
         }
     }
 
@@ -91,164 +137,11 @@ impl Prompter {
                 },
             };
 
-            match action.as_str() {
-                HEADERS | HEADERS_RAW => {
-                    let raw = action == HEADERS_RAW;
-                    match headers::prompt_headers(&mut self.bidi_sid_alloc, raw) {
-                        Ok(action) => {
-                            actions.push(action);
-                        },
-
-                        Err(e) =>
-                            if handle_action_loop_error(e) {
-                                return actions;
-                            } else {
-                                continue;
-                            },
-                    }
-                },
-                DATA => match prompt_data() {
-                    Ok(action) => {
-                        actions.push(action);
-                    },
-
-                    Err(e) =>
-                        if handle_action_loop_error(e) {
-                            return actions;
-                        } else {
-                            continue;
-                        },
-                },
-
-                SETTINGS => match settings::prompt_settings() {
-                    Ok(action) => {
-                        actions.push(action);
-                    },
-                    Err(e) =>
-                        if handle_action_loop_error(e) {
-                            return actions;
-                        } else {
-                            continue;
-                        },
-                },
-                OPEN_UNI_STREAM =>
-                    match stream::prompt_open_uni_stream(&mut self.uni_sid_alloc)
-                    {
-                        Ok(action) => actions.push(action),
-                        Err(e) =>
-                            if handle_action_loop_error(e) {
-                                return actions;
-                            } else {
-                                continue;
-                            },
-                    },
-                RESET_STREAM => match stream::prompt_reset_stream() {
-                    Ok(action) => actions.push(action),
-                    Err(e) =>
-                        if handle_action_loop_error(e) {
-                            return actions;
-                        } else {
-                            continue;
-                        },
-                },
-                STOP_SENDING => match stream::prompt_stop_sending() {
-                    Ok(action) => actions.push(action),
-                    Err(e) =>
-                        if handle_action_loop_error(e) {
-                            return actions;
-                        } else {
-                            continue;
-                        },
-                },
-                GREASE => match prompt_grease() {
-                    Ok(action) => {
-                        actions.push(action);
-                    },
-                    Err(e) =>
-                        if handle_action_loop_error(e) {
-                            return actions;
-                        } else {
-                            continue;
-                        },
-                },
-                EXTENSION => match prompt_extension() {
-                    Ok(action) => {
-                        actions.push(action);
-                    },
-                    Err(e) =>
-                        if handle_action_loop_error(e) {
-                            return actions;
-                        } else {
-                            continue;
-                        },
-                },
-
-                GOAWAY => match prompt_goaway() {
-                    Ok(action) => {
-                        actions.push(action);
-                    },
-                    Err(e) =>
-                        if handle_action_loop_error(e) {
-                            return actions;
-                        } else {
-                            continue;
-                        },
-                },
-
-                MAX_PUSH_ID => match prompt_max_push_id() {
-                    Ok(action) => {
-                        actions.push(action);
-                    },
-                    Err(e) =>
-                        if handle_action_loop_error(e) {
-                            return actions;
-                        } else {
-                            continue;
-                        },
-                },
-
-                CANCEL_PUSH => match prompt_cancel_push() {
-                    Ok(action) => {
-                        actions.push(action);
-                    },
-                    Err(e) =>
-                        if handle_action_loop_error(e) {
-                            return actions;
-                        } else {
-                            continue;
-                        },
-                },
-
-                PUSH_PROMISE => match prompt_push_promise() {
-                    Ok(action) => {
-                        actions.push(action);
-                    },
-                    Err(e) =>
-                        if handle_action_loop_error(e) {
-                            return actions;
-                        } else {
-                            continue;
-                        },
-                },
-
-                PRIORITY_UPDATE => match priority::prompt_priority() {
-                    Ok(action) => {
-                        actions.push(action);
-                    },
-                    Err(e) =>
-                        if handle_action_loop_error(e) {
-                            return actions;
-                        } else {
-                            continue;
-                        },
-                },
-                FLUSH => {
-                    return actions;
-                },
-                QUIT => {
-                    return vec![];
-                },
-                _ => println!("error: unknown action {}", action),
+            match self.foo(&action) {
+                PromptOutcome::Action(action) => actions.push(action),
+                PromptOutcome::Repeat => continue,
+                PromptOutcome::Flush => return actions,
+                PromptOutcome::Clear => return vec![],
             }
         }
     }
