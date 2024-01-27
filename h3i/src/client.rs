@@ -494,12 +494,11 @@ where
 
             Action::ResetStream {
                 stream_id,
-                transport,
                 error_code,
             } => {
                 println!(
-                    "reset_stream stream_id={} transport={} error_code={}",
-                    stream_id, transport, error_code
+                    "reset_stream stream_id={} error_code={}",
+                    stream_id, error_code
                 );
                 if let Err(e) = conn.stream_shutdown(
                     *stream_id,
@@ -512,12 +511,11 @@ where
 
             Action::StopSending {
                 stream_id,
-                transport,
                 error_code,
             } => {
                 println!(
-                    "stop_sending stream id={} transport={} error_code={}",
-                    stream_id, transport, error_code
+                    "stop_sending stream id={} error_code={}",
+                    stream_id, error_code
                 );
 
                 if let Err(e) = conn.stream_shutdown(

@@ -6,6 +6,7 @@ use qlog::events::EventData;
 use quiche::h3::NameValue;
 
 use smallvec::smallvec;
+use smallvec::SmallVec;
 
 #[derive(Default)]
 pub struct StreamIdAllocator {
@@ -44,14 +45,8 @@ fn encode_header_block(
     Ok(header_block)
 }
 
-fn dummy_packet_with_stream_frame(
-    stream_id: u64, fin: bool,
-) -> Option<EventData> {
-    if !fin {
-        return None;
-    }
-
-    let header = PacketHeader {
+fn fake_packet_header() -> PacketHeader {
+    PacketHeader {
         packet_type: PacketType::OneRtt,
         packet_number: None,
         flags: None,
@@ -62,10 +57,28 @@ fn dummy_packet_with_stream_frame(
         dcil: None,
         scid: None,
         dcid: None,
-    };
+    }
+}
 
-    Some(EventData::PacketSent(PacketSent {
-        header,
+fn fake_packet_with_stream_fin(stream_id: u64, fin: bool) -> Option<EventData> {
+    if !fin {
+        return None;
+    }
+
+    let frames = Some(smallvec![QuicFrame::Stream {
+        stream_id,
+        offset: 0,
+        length: 0,
+        fin: Some(fin),
+        raw: None
+    }]);
+
+    Some(fake_packet_sent(frames))
+}
+
+pub fn fake_packet_sent(frames: Option<SmallVec<[QuicFrame; 1]>>) -> EventData {
+    EventData::PacketSent(PacketSent {
+        header: fake_packet_header(),
         is_coalesced: None,
         retry_token: None,
         stateless_reset_token: None,
@@ -74,14 +87,8 @@ fn dummy_packet_with_stream_frame(
         datagram_id: None,
         trigger: None,
         send_at_time: None,
-        frames: Some(smallvec![QuicFrame::Stream {
-            stream_id,
-            offset: 0,
-            length: 0,
-            fin: Some(fin),
-            raw: None
-        }]),
-    }))
+        frames,
+    })
 }
 
 pub mod client;

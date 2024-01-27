@@ -145,33 +145,30 @@ pub fn prompt_fin_stream() -> InquireResult<bool> {
 #[derive(Default, Debug)]
 pub struct StreamShutdown {
     pub stream_id: u64,
-    pub transport: bool,
     pub error_code: u64,
 }
 
 impl StreamShutdown {}
 
 pub fn prompt_reset_stream() -> InquireResult<Action> {
-    let (stream_id, transport, error_code) = prompt_close_stream()?;
+    let (stream_id, error_code) = prompt_close_stream()?;
 
     Ok(Action::ResetStream {
         stream_id,
-        transport,
         error_code,
     })
 }
 
 pub fn prompt_stop_sending() -> InquireResult<Action> {
-    let (stream_id, transport, error_code) = prompt_close_stream()?;
+    let (stream_id, error_code) = prompt_close_stream()?;
 
     Ok(Action::StopSending {
         stream_id,
-        transport,
         error_code,
     })
 }
 
-fn prompt_close_stream() -> InquireResult<(u64, bool, u64)> {
+fn prompt_close_stream() -> InquireResult<(u64, u64)> {
     let id = prompts::prompt_stream_id()?;
 
     let trans_or_app = prompt_transport_or_app()?;
@@ -238,7 +235,7 @@ fn prompt_close_stream() -> InquireResult<(u64, bool, u64)> {
         }
     };
 
-    Ok((id, transport, error_code))
+    Ok((id, error_code))
 }
 
 fn prompt_transport_or_app() -> InquireResult<String> {

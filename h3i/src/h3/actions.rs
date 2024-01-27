@@ -13,8 +13,11 @@ use quiche::h3::frame::Frame;
 use quiche::h3::NameValue;
 use serde_json::json;
 
-use crate::dummy_packet_with_stream_frame;
+use smallvec::smallvec;
+
 use crate::encode_header_block;
+use crate::fake_packet_sent;
+use crate::fake_packet_with_stream_fin;
 
 pub const HTTP3_CONTROL_STREAM_TYPE_ID: u64 = 0x0;
 pub const HTTP3_PUSH_STREAM_TYPE_ID: u64 = 0x1;
@@ -50,13 +53,11 @@ pub enum Action {
 
     ResetStream {
         stream_id: u64,
-        transport: bool,
         error_code: u64,
     },
 
     StopSending {
         stream_id: u64,
-        transport: bool,
         error_code: u64,
     },
 }
@@ -165,7 +166,7 @@ impl Action {
                 bytes: _,
             } => {
                 if let Some(dummy) =
-                    dummy_packet_with_stream_frame(*stream_id, *fin_stream)
+                    fake_packet_with_stream_fin(*stream_id, *fin_stream)
                 {
                     vec![(dummy, BTreeMap::new())]
                 } else {
@@ -173,7 +174,30 @@ impl Action {
                 }
             },
 
-            _ => vec![],
+            Action::ResetStream {
+                stream_id,
+                error_code,
+            } => {
+                let ev =
+                    fake_packet_sent(Some(smallvec![QuicFrame::ResetStream {
+                        stream_id: *stream_id,
+                        error_code: *error_code,
+                        final_size: 0
+                    }]));
+                vec![(ev, BTreeMap::new())]
+            },
+
+            Action::StopSending {
+                stream_id,
+                error_code,
+            } => {
+                let ev =
+                    fake_packet_sent(Some(smallvec![QuicFrame::StopSending {
+                        stream_id: *stream_id,
+                        error_code: *error_code,
+                    }]));
+                vec![(ev, BTreeMap::new())]
+            },
         }
     }
 
@@ -208,8 +232,23 @@ impl Action {
             for frame in frames {
                 match &frame {
                     // TODO add these
-                    QuicFrame::ResetStream { .. } => (),
-                    QuicFrame::StopSending { .. } => (),
+                    QuicFrame::ResetStream {
+                        stream_id,
+                        error_code,
+                        ..
+                    } => actions.push(Action::ResetStream {
+                        stream_id: *stream_id,
+                        error_code: *error_code,
+                    }),
+
+                    QuicFrame::StopSending {
+                        stream_id,
+                        error_code,
+                        ..
+                    } => actions.push(Action::StopSending {
+                        stream_id: *stream_id,
+                        error_code: *error_code,
+                    }),
 
                     QuicFrame::Stream { stream_id, fin, .. } => {
                         let fin = fin.unwrap_or_default();
