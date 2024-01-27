@@ -4,6 +4,7 @@ use qlog::events::h3::H3FrameCreated;
 use qlog::events::h3::H3Owner;
 use qlog::events::h3::H3StreamTypeSet;
 use qlog::events::h3::Http3Frame;
+use qlog::events::quic::PacketSent;
 use qlog::events::quic::QuicFrame;
 use qlog::events::Event;
 use qlog::events::EventData;
@@ -180,112 +181,167 @@ impl Action {
         let mut actions = vec![];
         match &event.data {
             EventData::PacketSent(ps) => {
-                if let Some(frames) = &ps.frames {
-                    for frame in frames {
-                        match &frame {
-                            // TODO add these
-                            QuicFrame::ResetStream { .. } => (),
-                            QuicFrame::StopSending { .. } => (),
-
-                            QuicFrame::Stream { stream_id, fin, .. } => {
-                                let fin = fin.unwrap_or_default();
-
-                                if fin {
-                                    actions.push(Action::StreamBytes {
-                                        stream_id: *stream_id,
-                                        fin_stream: true,
-                                        bytes: vec![],
-                                    });
-                                }
-                            },
-
-                            _ => (),
-                        }
-                    }
-                }
+                let packet_actions = Self::from_qlog_packet(ps);
+                actions.extend(packet_actions);
             },
 
             EventData::H3FrameCreated(fc) => {
-                let stream_id = fc.stream_id;
-                let fin_stream = event
-                    .ex_data
-                    .get("fin_stream")
-                    .unwrap_or(&serde_json::Value::Null)
-                    .as_bool()
-                    .unwrap_or_default();
-
-                match &fc.frame {
-                    Http3Frame::Settings { settings } => {
-                        let mut raw_settings = vec![];
-                        // This is ugly but it reflects ambiguity in the qlog
-                        // specs.
-                        for s in settings {
-                            match s.name.as_str() {
-                                "MAX_FIELD_SECTION_SIZE" =>
-                                    raw_settings.push((0x6, s.value)),
-                                "QPACK_MAX_TABLE_CAPACITY" =>
-                                    raw_settings.push((0x1, s.value)),
-                                "QPACK_BLOCKED_STREAMS" =>
-                                    raw_settings.push((0x7, s.value)),
-                                "SETTINGS_ENABLE_CONNECT_PROTOCOL" =>
-                                    raw_settings.push((0x8, s.value)),
-                                "H3_DATAGRAM" =>
-                                    raw_settings.push((0x33, s.value)),
-
-                                _ =>
-                                    if let Ok(ty) = s.name.parse::<u64>() {
-                                        raw_settings.push((ty, s.value));
-                                    },
-                            }
-                        }
-                        actions.push(Action::SendFrame {
-                            stream_id,
-                            fin_stream,
-                            frame: Frame::Settings {
-                                max_field_section_size: None,
-                                qpack_max_table_capacity: None,
-                                qpack_blocked_streams: None,
-                                connect_protocol_enabled: None,
-                                h3_datagram: None,
-                                grease: None,
-                                raw: Some(raw_settings),
-                            },
-                        })
-                    },
-
-                    Http3Frame::Headers { headers } => {
-                        let hdrs: Vec<quiche::h3::Header> = headers
-                            .iter()
-                            .map(|h| {
-                                quiche::h3::Header::new(
-                                    h.name.as_bytes(),
-                                    h.value.as_bytes(),
-                                )
-                            })
-                            .collect();
-                        let header_block = encode_header_block(&hdrs).unwrap();
-                        actions.push(Action::SendHeadersFrame {
-                            stream_id,
-                            fin_stream,
-                            headers: hdrs,
-                            frame: Frame::Headers { header_block },
-                        });
-                    },
-
-                    Http3Frame::Goaway { id } => {
-                        actions.push(Action::SendFrame {
-                            stream_id,
-                            fin_stream,
-                            frame: Frame::GoAway { id: *id },
-                        });
-                    },
-
-                    _ => unimplemented!(),
-                }
+                let frame_actions = Self::from_qlog_frame(fc, &event.ex_data);
+                actions.extend(frame_actions);
             },
+
+            EventData::H3StreamTypeSet(st) => {
+                let stream_actions =
+                    Self::from_qlog_stream_type_set(st, &event.ex_data);
+                actions.extend(stream_actions);
+            },
+
             _ => (),
         }
 
         actions
     }
+
+    fn from_qlog_packet(ps: &PacketSent) -> Vec<Action> {
+        let mut actions = vec![];
+        if let Some(frames) = &ps.frames {
+            for frame in frames {
+                match &frame {
+                    // TODO add these
+                    QuicFrame::ResetStream { .. } => (),
+                    QuicFrame::StopSending { .. } => (),
+
+                    QuicFrame::Stream { stream_id, fin, .. } => {
+                        let fin = fin.unwrap_or_default();
+
+                        if fin {
+                            actions.push(Action::StreamBytes {
+                                stream_id: *stream_id,
+                                fin_stream: true,
+                                bytes: vec![],
+                            });
+                        }
+                    },
+
+                    _ => (),
+                }
+            }
+        }
+
+        actions
+    }
+
+    fn from_qlog_frame(fc: &H3FrameCreated, ex_data: &ExData) -> Vec<Action> {
+        let mut actions = vec![];
+        let stream_id = fc.stream_id;
+        let fin_stream = ex_data
+            .get("fin_stream")
+            .unwrap_or(&serde_json::Value::Null)
+            .as_bool()
+            .unwrap_or_default();
+
+        match &fc.frame {
+            Http3Frame::Settings { settings } => {
+                let mut raw_settings = vec![];
+                // This is ugly but it reflects ambiguity in the qlog
+                // specs.
+                for s in settings {
+                    match s.name.as_str() {
+                        "MAX_FIELD_SECTION_SIZE" =>
+                            raw_settings.push((0x6, s.value)),
+                        "QPACK_MAX_TABLE_CAPACITY" =>
+                            raw_settings.push((0x1, s.value)),
+                        "QPACK_BLOCKED_STREAMS" =>
+                            raw_settings.push((0x7, s.value)),
+                        "SETTINGS_ENABLE_CONNECT_PROTOCOL" =>
+                            raw_settings.push((0x8, s.value)),
+                        "H3_DATAGRAM" => raw_settings.push((0x33, s.value)),
+
+                        _ =>
+                            if let Ok(ty) = s.name.parse::<u64>() {
+                                raw_settings.push((ty, s.value));
+                            },
+                    }
+                }
+                actions.push(Action::SendFrame {
+                    stream_id,
+                    fin_stream,
+                    frame: Frame::Settings {
+                        max_field_section_size: None,
+                        qpack_max_table_capacity: None,
+                        qpack_blocked_streams: None,
+                        connect_protocol_enabled: None,
+                        h3_datagram: None,
+                        grease: None,
+                        raw: Some(raw_settings),
+                    },
+                })
+            },
+
+            Http3Frame::Headers { headers } => {
+                let hdrs: Vec<quiche::h3::Header> = headers
+                    .iter()
+                    .map(|h| {
+                        quiche::h3::Header::new(
+                            h.name.as_bytes(),
+                            h.value.as_bytes(),
+                        )
+                    })
+                    .collect();
+                let header_block = encode_header_block(&hdrs).unwrap();
+                actions.push(Action::SendHeadersFrame {
+                    stream_id,
+                    fin_stream,
+                    headers: hdrs,
+                    frame: Frame::Headers { header_block },
+                });
+            },
+
+            Http3Frame::Goaway { id } => {
+                actions.push(Action::SendFrame {
+                    stream_id,
+                    fin_stream,
+                    frame: Frame::GoAway { id: *id },
+                });
+            },
+
+            _ => unimplemented!(),
+        }
+
+        actions
+    }
+
+    fn from_qlog_stream_type_set(
+        st: &H3StreamTypeSet, ex_data: &ExData,
+    ) -> Vec<Action> {
+        let mut actions = vec![];
+        let fin_stream = parse_ex_data(ex_data);
+        let stream_type = match st.stream_type {
+            qlog::events::h3::H3StreamType::Control => Some(0x0),
+            qlog::events::h3::H3StreamType::Push => Some(0x1),
+            qlog::events::h3::H3StreamType::QpackEncode => Some(0x2),
+            qlog::events::h3::H3StreamType::QpackDecode => Some(0x3),
+            qlog::events::h3::H3StreamType::Reserved |
+            qlog::events::h3::H3StreamType::Unknown => st.stream_type_value,
+            _ => None,
+        };
+
+        if let Some(ty) = stream_type {
+            actions.push(Action::OpenUniStream {
+                stream_id: st.stream_id,
+                fin_stream,
+                stream_type: ty,
+            })
+        }
+
+        actions
+    }
+}
+
+fn parse_ex_data(ex_data: &ExData) -> bool {
+    ex_data
+        .get("fin_stream")
+        .unwrap_or(&serde_json::Value::Null)
+        .as_bool()
+        .unwrap_or_default()
 }

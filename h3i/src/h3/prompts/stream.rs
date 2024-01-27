@@ -8,6 +8,7 @@ use crate::h3::actions::Action;
 use crate::h3::prompts;
 use crate::StreamIdAllocator;
 
+use super::squish_suggester;
 use super::SuggestionResult;
 
 const CONTROL_STREAM: &str = "Control Stream";
@@ -94,16 +95,12 @@ pub fn prompt_open_uni_stream(
     sid_alloc: &mut StreamIdAllocator,
 ) -> InquireResult<Action> {
     let stream_id = autopick_stream_id(sid_alloc)?;
-    let stream_type = Select::new("stream type:", vec![
-        CONTROL_STREAM,
-        QPACK_ENCODER,
-        QPACK_DECODER,
-        PUSH_STREAM,
-    ])
-    .with_help_message(&format!("Press enter for default ({})", CONTROL_STREAM))
-    .prompt()?;
+    let stream_type = Text::new("stream type:")
+        .with_validator(validate_stream_type)
+        .with_autocomplete(&stream_type_suggestor)
+        .prompt()?;
 
-    let ty = match stream_type {
+    let ty = match stream_type.as_str() {
         CONTROL_STREAM => 0x0,
         PUSH_STREAM => 0x1,
         QPACK_ENCODER => 0x2,
@@ -118,6 +115,23 @@ pub fn prompt_open_uni_stream(
         fin_stream,
         stream_type: ty,
     })
+}
+
+fn validate_stream_type(id: &str) -> SuggestionResult<Validation> {
+    if matches!(
+        id,
+        CONTROL_STREAM | PUSH_STREAM | QPACK_ENCODER | QPACK_DECODER
+    ) {
+        return Ok(Validation::Valid);
+    }
+
+    prompts::validate_varint(id)
+}
+
+fn stream_type_suggestor(val: &str) -> SuggestionResult<Vec<String>> {
+    let suggestions = [CONTROL_STREAM, PUSH_STREAM, QPACK_ENCODER, QPACK_DECODER];
+
+    squish_suggester(&suggestions, val)
 }
 
 pub fn prompt_fin_stream() -> InquireResult<bool> {
