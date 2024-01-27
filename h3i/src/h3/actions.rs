@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
 use qlog::events::h3::H3FrameCreated;
+use qlog::events::h3::H3Owner;
+use qlog::events::h3::H3StreamTypeSet;
 use qlog::events::h3::Http3Frame;
 use qlog::events::quic::QuicFrame;
 use qlog::events::Event;
@@ -12,6 +14,11 @@ use serde_json::json;
 
 use crate::dummy_packet_with_stream_frame;
 use crate::encode_header_block;
+
+pub const HTTP3_CONTROL_STREAM_TYPE_ID: u64 = 0x0;
+pub const HTTP3_PUSH_STREAM_TYPE_ID: u64 = 0x1;
+pub const QPACK_ENCODER_STREAM_TYPE_ID: u64 = 0x2;
+pub const QPACK_DECODER_STREAM_TYPE_ID: u64 = 0x3;
 
 #[derive(Debug)]
 pub enum Action {
@@ -32,6 +39,12 @@ pub enum Action {
         stream_id: u64,
         fin_stream: bool,
         bytes: Vec<u8>,
+    },
+
+    OpenUniStream {
+        stream_id: u64,
+        fin_stream: bool,
+        stream_type: u64,
     },
 
     ResetStream {
@@ -103,6 +116,46 @@ impl Action {
                 }
 
                 vec![(frame_ev, ex)]
+            },
+
+            Action::OpenUniStream {
+                stream_id,
+                fin_stream,
+                stream_type,
+            } => {
+                let ty = match *stream_type {
+                    HTTP3_CONTROL_STREAM_TYPE_ID =>
+                        qlog::events::h3::H3StreamType::Control,
+                    HTTP3_PUSH_STREAM_TYPE_ID =>
+                        qlog::events::h3::H3StreamType::Push,
+                    QPACK_ENCODER_STREAM_TYPE_ID =>
+                        qlog::events::h3::H3StreamType::QpackEncode,
+                    QPACK_DECODER_STREAM_TYPE_ID =>
+                        qlog::events::h3::H3StreamType::QpackDecode,
+
+                    _ => qlog::events::h3::H3StreamType::Unknown,
+                };
+                let ty_val =
+                    if matches!(ty, qlog::events::h3::H3StreamType::Unknown) {
+                        Some(*stream_type)
+                    } else {
+                        None
+                    };
+
+                let stream_ev = EventData::H3StreamTypeSet(H3StreamTypeSet {
+                    owner: Some(H3Owner::Local),
+                    stream_id: *stream_id,
+                    stream_type: ty,
+                    stream_type_value: ty_val,
+                    associated_push_id: None,
+                });
+                let mut ex = BTreeMap::new();
+
+                if *fin_stream {
+                    ex.insert("fin_stream".to_string(), json!(true));
+                }
+
+                vec![(stream_ev, ex)]
             },
 
             Action::StreamBytes {

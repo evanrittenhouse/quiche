@@ -112,17 +112,11 @@ pub fn prompt_open_uni_stream(
     };
 
     let fin_stream = prompt_fin_stream()?;
-    println!("open uni stream_id={} ty={}", stream_id, ty);
 
-    let mut d = [42; 8];
-    let mut b = octets::OctetsMut::with_slice(&mut d);
-    b.put_varint(ty).unwrap();
-    let off = b.off();
-
-    Ok(Action::StreamBytes {
+    Ok(Action::OpenUniStream {
         stream_id,
-        bytes: d[..off].to_vec(),
         fin_stream,
+        stream_type: ty,
     })
 }
 

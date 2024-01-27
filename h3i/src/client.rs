@@ -459,6 +459,25 @@ where
                     .unwrap();
             },
 
+            Action::OpenUniStream {
+                stream_id,
+                fin_stream,
+                stream_type,
+            } => {
+                println!(
+                    "open uni stream_id={} ty={} fin={}",
+                    stream_id, stream_type, fin_stream
+                );
+
+                let mut d = [42; 8];
+                let mut b = octets::OctetsMut::with_slice(&mut d);
+                b.put_varint(*stream_type).unwrap();
+                let off = b.off();
+
+                conn.stream_send(*stream_id, &d[..off], *fin_stream)
+                    .unwrap();
+            },
+
             Action::StreamBytes {
                 stream_id,
                 bytes,
