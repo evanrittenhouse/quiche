@@ -3,6 +3,9 @@ use std::net::ToSocketAddrs;
 use qlog::events::h3::H3FrameParsed;
 use qlog::events::h3::Http3Frame;
 use qlog::events::EventData;
+use tokio_quiche::quiche::Config as QConfig;
+use tokio_quiche::settings::MtuConfig;
+use tokio_quiche::Config;
 
 use crate::config::AppConfig;
 use crate::h3::actions::Action;
@@ -402,131 +405,7 @@ where
 {
     // Send actions
     for action in iter {
-        match action {
-            Action::SendFrame {
-                stream_id,
-                fin_stream,
-                frame,
-            } => {
-                println!("frame tx id={} frame={:?}", stream_id, frame);
-
-                // TODO: make serialization smarter
-                let mut d = [42; 9999];
-                let mut b = octets::OctetsMut::with_slice(&mut d);
-
-                if let Some(s) = conn.qlog_streamer() {
-                    for (ev, ex) in action.to_qlog() {
-                        // skip dummy packet
-                        if matches!(ev, EventData::PacketSent(..)) {
-                            continue;
-                        }
-
-                        s.add_event_data_ex_now(ev, ex).ok();
-                    }
-                }
-                let len = frame.to_bytes(&mut b).unwrap();
-                conn.stream_send(*stream_id, &d[..len], *fin_stream)
-                    .unwrap();
-            },
-
-            Action::SendHeadersFrame {
-                stream_id,
-                fin_stream,
-                headers,
-                frame,
-            } => {
-                println!(
-                    "headers frame tx stream={} hdrs={:?}",
-                    stream_id, headers
-                );
-
-                // TODO: make serialization smarter
-                let mut d = [42; 9999];
-                let mut b = octets::OctetsMut::with_slice(&mut d);
-
-                if let Some(s) = conn.qlog_streamer() {
-                    for (ev, ex) in action.to_qlog() {
-                        // skip dummy packet
-                        if matches!(ev, EventData::PacketSent(..)) {
-                            continue;
-                        }
-
-                        s.add_event_data_ex_now(ev, ex).ok();
-                    }
-                }
-                let len = frame.to_bytes(&mut b).unwrap();
-                conn.stream_send(*stream_id, &d[..len], *fin_stream)
-                    .unwrap();
-            },
-
-            Action::OpenUniStream {
-                stream_id,
-                fin_stream,
-                stream_type,
-            } => {
-                println!(
-                    "open uni stream_id={} ty={} fin={}",
-                    stream_id, stream_type, fin_stream
-                );
-
-                let mut d = [42; 8];
-                let mut b = octets::OctetsMut::with_slice(&mut d);
-                b.put_varint(*stream_type).unwrap();
-                let off = b.off();
-
-                conn.stream_send(*stream_id, &d[..off], *fin_stream)
-                    .unwrap();
-            },
-
-            Action::StreamBytes {
-                stream_id,
-                bytes,
-                fin_stream,
-            } => {
-                println!(
-                    "stream bytes tx id={} len={} fin={}",
-                    stream_id,
-                    bytes.len(),
-                    fin_stream
-                );
-                conn.stream_send(*stream_id, bytes, *fin_stream).unwrap();
-            },
-
-            Action::ResetStream {
-                stream_id,
-                error_code,
-            } => {
-                println!(
-                    "reset_stream stream_id={} error_code={}",
-                    stream_id, error_code
-                );
-                if let Err(e) = conn.stream_shutdown(
-                    *stream_id,
-                    quiche::Shutdown::Write,
-                    *error_code,
-                ) {
-                    println!("can't send reset_stream: {}", e);
-                }
-            },
-
-            Action::StopSending {
-                stream_id,
-                error_code,
-            } => {
-                println!(
-                    "stop_sending stream id={} error_code={}",
-                    stream_id, error_code
-                );
-
-                if let Err(e) = conn.stream_shutdown(
-                    *stream_id,
-                    quiche::Shutdown::Read,
-                    *error_code,
-                ) {
-                    println!("can't send stop_sending: {}", e);
-                }
-            },
-        }
+        action.execute(conn)
     }
 }
 
@@ -599,7 +478,7 @@ fn parse_streams(conn: &mut quiche::Connection) {
                             }
                         },
 
-                        _ =>
+                        _ => {
                             if let Some(s) = conn.qlog_streamer() {
                                 let ev_data =
                                     EventData::H3FrameParsed(H3FrameParsed {
@@ -610,7 +489,8 @@ fn parse_streams(conn: &mut quiche::Connection) {
                                     });
 
                                 s.add_event_data_now(ev_data).ok();
-                            },
+                            }
+                        },
                     }
 
                     if tlv.off() == len {

@@ -63,6 +63,134 @@ pub enum Action {
 }
 
 impl Action {
+    pub fn execute(&self, conn: &mut quiche::Connection) {
+        match self {
+            Action::SendFrame {
+                stream_id,
+                fin_stream,
+                frame,
+            } => {
+                println!("frame tx id={} frame={:?}", stream_id, frame);
+
+                // TODO: make serialization smarter
+                let mut d = [42; 9999];
+                let mut b = octets::OctetsMut::with_slice(&mut d);
+
+                if let Some(s) = conn.qlog_streamer() {
+                    for (ev, ex) in self.to_qlog() {
+                        // skip dummy packet
+                        if matches!(ev, EventData::PacketSent(..)) {
+                            continue;
+                        }
+
+                        s.add_event_data_ex_now(ev, ex).ok();
+                    }
+                }
+                let len = frame.to_bytes(&mut b).unwrap();
+                conn.stream_send(*stream_id, &d[..len], *fin_stream)
+                    .unwrap();
+            },
+
+            Action::SendHeadersFrame {
+                stream_id,
+                fin_stream,
+                headers,
+                frame,
+            } => {
+                println!(
+                    "headers frame tx stream={} hdrs={:?}",
+                    stream_id, headers
+                );
+
+                // TODO: make serialization smarter
+                let mut d = [42; 9999];
+                let mut b = octets::OctetsMut::with_slice(&mut d);
+
+                if let Some(s) = conn.qlog_streamer() {
+                    for (ev, ex) in self.to_qlog() {
+                        // skip dummy packet
+                        if matches!(ev, EventData::PacketSent(..)) {
+                            continue;
+                        }
+
+                        s.add_event_data_ex_now(ev, ex).ok();
+                    }
+                }
+                let len = frame.to_bytes(&mut b).unwrap();
+                conn.stream_send(*stream_id, &d[..len], *fin_stream)
+                    .unwrap();
+            },
+
+            Action::OpenUniStream {
+                stream_id,
+                fin_stream,
+                stream_type,
+            } => {
+                println!(
+                    "open uni stream_id={} ty={} fin={}",
+                    stream_id, stream_type, fin_stream
+                );
+
+                let mut d = [42; 8];
+                let mut b = octets::OctetsMut::with_slice(&mut d);
+                b.put_varint(*stream_type).unwrap();
+                let off = b.off();
+
+                conn.stream_send(*stream_id, &d[..off], *fin_stream)
+                    .unwrap();
+            },
+
+            Action::StreamBytes {
+                stream_id,
+                bytes,
+                fin_stream,
+            } => {
+                println!(
+                    "stream bytes tx id={} len={} fin={}",
+                    stream_id,
+                    bytes.len(),
+                    fin_stream
+                );
+                conn.stream_send(*stream_id, bytes, *fin_stream).unwrap();
+            },
+
+            Action::ResetStream {
+                stream_id,
+                error_code,
+            } => {
+                println!(
+                    "reset_stream stream_id={} error_code={}",
+                    stream_id, error_code
+                );
+                if let Err(e) = conn.stream_shutdown(
+                    *stream_id,
+                    quiche::Shutdown::Write,
+                    *error_code,
+                ) {
+                    println!("can't send reset_stream: {}", e);
+                }
+            },
+
+            Action::StopSending {
+                stream_id,
+                error_code,
+            } => {
+                println!(
+                    "stop_sending stream id={} error_code={}",
+                    stream_id, error_code
+                );
+
+                if let Err(e) = conn.stream_shutdown(
+                    *stream_id,
+                    quiche::Shutdown::Read,
+                    *error_code,
+                ) {
+                    println!("can't send stop_sending: {}", e);
+                }
+            },
+        }
+    }
+
     pub fn to_qlog(&self) -> Vec<(EventData, ExData)> {
         match self {
             Action::SendFrame {
@@ -126,14 +254,18 @@ impl Action {
                 stream_type,
             } => {
                 let ty = match *stream_type {
-                    HTTP3_CONTROL_STREAM_TYPE_ID =>
-                        qlog::events::h3::H3StreamType::Control,
-                    HTTP3_PUSH_STREAM_TYPE_ID =>
-                        qlog::events::h3::H3StreamType::Push,
-                    QPACK_ENCODER_STREAM_TYPE_ID =>
-                        qlog::events::h3::H3StreamType::QpackEncode,
-                    QPACK_DECODER_STREAM_TYPE_ID =>
-                        qlog::events::h3::H3StreamType::QpackDecode,
+                    HTTP3_CONTROL_STREAM_TYPE_ID => {
+                        qlog::events::h3::H3StreamType::Control
+                    },
+                    HTTP3_PUSH_STREAM_TYPE_ID => {
+                        qlog::events::h3::H3StreamType::Push
+                    },
+                    QPACK_ENCODER_STREAM_TYPE_ID => {
+                        qlog::events::h3::H3StreamType::QpackEncode
+                    },
+                    QPACK_DECODER_STREAM_TYPE_ID => {
+                        qlog::events::h3::H3StreamType::QpackDecode
+                    },
 
                     _ => qlog::events::h3::H3StreamType::Unknown,
                 };
@@ -286,20 +418,25 @@ impl Action {
                 // specs.
                 for s in settings {
                     match s.name.as_str() {
-                        "MAX_FIELD_SECTION_SIZE" =>
-                            raw_settings.push((0x6, s.value)),
-                        "QPACK_MAX_TABLE_CAPACITY" =>
-                            raw_settings.push((0x1, s.value)),
-                        "QPACK_BLOCKED_STREAMS" =>
-                            raw_settings.push((0x7, s.value)),
-                        "SETTINGS_ENABLE_CONNECT_PROTOCOL" =>
-                            raw_settings.push((0x8, s.value)),
+                        "MAX_FIELD_SECTION_SIZE" => {
+                            raw_settings.push((0x6, s.value))
+                        },
+                        "QPACK_MAX_TABLE_CAPACITY" => {
+                            raw_settings.push((0x1, s.value))
+                        },
+                        "QPACK_BLOCKED_STREAMS" => {
+                            raw_settings.push((0x7, s.value))
+                        },
+                        "SETTINGS_ENABLE_CONNECT_PROTOCOL" => {
+                            raw_settings.push((0x8, s.value))
+                        },
                         "H3_DATAGRAM" => raw_settings.push((0x33, s.value)),
 
-                        _ =>
+                        _ => {
                             if let Ok(ty) = s.name.parse::<u64>() {
                                 raw_settings.push((ty, s.value));
-                            },
+                            }
+                        },
                     }
                 }
                 actions.push(Action::SendFrame {
@@ -360,8 +497,8 @@ impl Action {
             qlog::events::h3::H3StreamType::Push => Some(0x1),
             qlog::events::h3::H3StreamType::QpackEncode => Some(0x2),
             qlog::events::h3::H3StreamType::QpackDecode => Some(0x3),
-            qlog::events::h3::H3StreamType::Reserved |
-            qlog::events::h3::H3StreamType::Unknown => st.stream_type_value,
+            qlog::events::h3::H3StreamType::Reserved
+            | qlog::events::h3::H3StreamType::Unknown => st.stream_type_value,
             _ => None,
         };
 

@@ -1,3 +1,5 @@
+use crate::quiche;
+
 use inquire::error::CustomUserError;
 use inquire::error::InquireResult;
 use inquire::validator::ErrorMessage;
@@ -90,8 +92,9 @@ impl Prompter {
 
             DATA => prompt_data(),
             SETTINGS => settings::prompt_settings(),
-            OPEN_UNI_STREAM =>
-                stream::prompt_open_uni_stream(&mut self.uni_sid_alloc),
+            OPEN_UNI_STREAM => {
+                stream::prompt_open_uni_stream(&mut self.uni_sid_alloc)
+            },
             RESET_STREAM => stream::prompt_reset_stream(),
             STOP_SENDING => stream::prompt_stop_sending(),
             GREASE => prompt_grease(),
@@ -112,12 +115,13 @@ impl Prompter {
 
         match res {
             Ok(action) => PromptOutcome::Action(action),
-            Err(e) =>
+            Err(e) => {
                 if handle_action_loop_error(e) {
                     PromptOutcome::Flush
                 } else {
                     PromptOutcome::Repeat
-                },
+                }
+            },
         }
     }
 
@@ -128,9 +132,10 @@ impl Prompter {
             println!();
             let action = match prompt_action() {
                 Ok(v) => v,
-                Err(inquire::InquireError::OperationCanceled) |
-                Err(inquire::InquireError::OperationInterrupted) =>
-                    return actions,
+                Err(inquire::InquireError::OperationCanceled)
+                | Err(inquire::InquireError::OperationInterrupted) => {
+                    return actions
+                },
                 Err(e) => {
                     println!("Unexpected error while determining action: {}", e);
                     return actions;
@@ -149,8 +154,8 @@ impl Prompter {
 
 fn handle_action_loop_error(err: InquireError) -> bool {
     match err {
-        inquire::InquireError::OperationCanceled |
-        inquire::InquireError::OperationInterrupted => false,
+        inquire::InquireError::OperationCanceled
+        | inquire::InquireError::OperationInterrupted => false,
 
         _ => {
             println!("Unexpected error: {}", err);
@@ -206,10 +211,11 @@ fn validate_varint(id: &str) -> SuggestionResult<Validation> {
     let x = id.parse::<u64>();
 
     match x {
-        Ok(v) =>
+        Ok(v) => {
             if v >= u64::pow(2, 62) {
                 return Ok(Validation::Invalid(ErrorMessage::Default));
-            },
+            }
+        },
 
         Err(_) => {
             return Ok(Validation::Invalid(ErrorMessage::Default));

@@ -1,3 +1,5 @@
+use tokio_quiche::quiche;
+
 use qlog::events::quic::PacketHeader;
 use qlog::events::quic::PacketSent;
 use qlog::events::quic::PacketType;
@@ -95,3 +97,4 @@ pub mod client;
 pub mod config;
 pub mod h3;
 mod tlv;
+pub mod tq_client;

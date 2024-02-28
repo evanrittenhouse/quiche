@@ -6,15 +6,24 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-trait = "0.1.61"
+# buffer-pool = { git = "ssh://git@bitbucket.cfdata.org:7999/oxy/lasagna.git", rev ="6400ade2b0381cde74397de62fcd760e622abc39" }
+buffer-pool = { path = "../../lasagna/crates/buffer-pool" }
 clap = "3"
 env_logger = "0.6"
+foundations = { version = "3.2", default-features = false }
 inquire = "0.6.2"
 mio = { version = "0.8", features = ["net", "os-poll"] }
 octets = { path = "../octets" }
 qlog = { version = "0.11.0", path = "../qlog" }
-quiche = { path = "../quiche", features = ["qlog", "internal"]}
+# qlog = { git = "git@github.com:cloudflare/quiche.git", rev = "2cd74cfab20f7fe4a4989fcf33be05bf87cf26b3" }
+# qlog = { git = "ssh://git@bitbucket.cfdata.org:7999/oxy/lasagna.git", rev ="6400ade2b0381cde74397de62fcd760e622abc39" }
+# quiche = { path = "../quiche", features = ["qlog", "internal"]}
 rand = "0.8.5"
 serde_json = "1"
 serde = "1"
+tokio = { version = "1.29", features = ["full", "test-util"] }
+# tokio-quiche = { git = "ssh://git@bitbucket.cfdata.org:7999/oxy/lasagna.git", rev ="6400ade2b0381cde74397de62fcd760e622abc39" }
+tokio-quiche = { path = "../../lasagna/tokio-quiche" }
 url = "1"
 smallvec = "1.11.2"
