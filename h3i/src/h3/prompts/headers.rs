@@ -1,8 +1,8 @@
 use crate::quiche;
+use crate::quiche::h3::frame::Frame;
 use inquire::error::InquireResult;
 use inquire::validator::Validation;
 use inquire::Text;
-use quiche::h3::frame::Frame;
 
 use crate::encode_header_block;
 use crate::h3;

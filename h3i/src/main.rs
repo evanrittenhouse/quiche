@@ -1,15 +1,27 @@
 use std::io::BufReader;
 use std::time;
 
+use foundations::service_info;
+use foundations::telemetry::log;
+use foundations::telemetry::settings::{LogVerbosity, TelemetrySettings};
 use h3i::config::AppConfig;
 use h3i::h3::actions::Action;
 use h3i::h3::prompts::Prompter;
 use qlog::reader::QlogSeqReader;
+use std::io::Result;
+use tokio_quiche::quiche::h3::frame::Frame;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::builder()
         .default_format_timestamp_nanos(true)
         .init();
+
+    let mut settings: TelemetrySettings = Default::default();
+    settings.logging.verbosity =
+        LogVerbosity(foundations::telemetry::settings::Level::Trace);
+
+    let _ = foundations::telemetry::init(&service_info!(), &settings);
 
     let config = match AppConfig::from_clap() {
         Ok(v) => v,
@@ -25,9 +37,29 @@ fn main() {
         None => prompt_frames(&config),
     };
 
-    println!();
+    // 1. get a list of actions somehow
+    //      - parsing a qlog file
+    //      - parsing a PCAP or something
+    // 2. connect the client
+    //      - don't need channels or anything since the actions are pre-determined at client
+    //        connection
 
-    h3i::client::connect(&config, &frame_actions).unwrap();
+    let stream_map_rx = h3i::tq_client::tq_connect(&config, frame_actions).await;
+    let stream_map = stream_map_rx.unwrap().await.unwrap();
+
+    log::info!("received stream map: {:?}", stream_map);
+
+    log::info!(
+        "for some reason asserts aren't working, so...: {}",
+        stream_map
+            .get(0)
+            .unwrap_or(&vec![])
+            .iter()
+            .any(|frame| match frame {
+                Frame::Headers { .. } => true,
+                _ => false,
+            })
+    );
 }
 
 fn read_qlog(filename: &str) -> Vec<Action> {

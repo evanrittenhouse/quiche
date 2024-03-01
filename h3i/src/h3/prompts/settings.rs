@@ -1,3 +1,5 @@
+use crate::h3::actions::Action;
+use crate::quiche;
 use inquire::error::InquireResult;
 use inquire::validator::Validation;
 use inquire::Text;
@@ -5,7 +7,6 @@ use inquire::Text;
 use super::squish_suggester;
 use super::stream::prompt_fin_stream;
 use super::SuggestionResult;
-use crate::h3::actions::Action;
 use crate::h3::prompts;
 
 const QPACK_MAX_TABLE_CAPACITY: &str = "QPACK_MAX_TABLE_CAPACITY";
@@ -94,11 +95,11 @@ fn settings_read_loop() -> RawSettings {
 fn validate_setting_type(id: &str) -> SuggestionResult<Validation> {
     if matches!(
         id,
-        "q!" | QPACK_MAX_TABLE_CAPACITY |
-            MAX_FIELD_SECTION_SIZE |
-            QPACK_BLOCKED_STREAMS |
-            ENABLE_CONNECT_PROTOCOL |
-            H3_DATAGRAM
+        "q!" | QPACK_MAX_TABLE_CAPACITY
+            | MAX_FIELD_SECTION_SIZE
+            | QPACK_BLOCKED_STREAMS
+            | ENABLE_CONNECT_PROTOCOL
+            | H3_DATAGRAM
     ) {
         return Ok(Validation::Valid);
     }
