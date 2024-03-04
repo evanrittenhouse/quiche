@@ -1,6 +1,7 @@
 use crate::quiche;
 use std::collections::BTreeMap;
 
+use foundations::telemetry::log;
 use qlog::events::h3::H3FrameCreated;
 use qlog::events::h3::H3Owner;
 use qlog::events::h3::H3StreamTypeSet;
@@ -71,7 +72,7 @@ impl Action {
                 fin_stream,
                 frame,
             } => {
-                println!("frame tx id={} frame={:?}", stream_id, frame);
+                log::debug!("frame tx id={} frame={:?}", stream_id, frame);
 
                 // TODO: make serialization smarter
                 let mut d = [42; 9999];
@@ -98,9 +99,10 @@ impl Action {
                 headers,
                 frame,
             } => {
-                println!(
+                log::debug!(
                     "headers frame tx stream={} hdrs={:?}",
-                    stream_id, headers
+                    stream_id,
+                    headers
                 );
 
                 // TODO: make serialization smarter
@@ -127,9 +129,11 @@ impl Action {
                 fin_stream,
                 stream_type,
             } => {
-                println!(
+                log::debug!(
                     "open uni stream_id={} ty={} fin={}",
-                    stream_id, stream_type, fin_stream
+                    stream_id,
+                    stream_type,
+                    fin_stream
                 );
 
                 let mut d = [42; 8];
@@ -146,7 +150,7 @@ impl Action {
                 bytes,
                 fin_stream,
             } => {
-                println!(
+                log::debug!(
                     "stream bytes tx id={} len={} fin={}",
                     stream_id,
                     bytes.len(),
@@ -159,16 +163,17 @@ impl Action {
                 stream_id,
                 error_code,
             } => {
-                println!(
+                log::debug!(
                     "reset_stream stream_id={} error_code={}",
-                    stream_id, error_code
+                    stream_id,
+                    error_code
                 );
                 if let Err(e) = conn.stream_shutdown(
                     *stream_id,
                     quiche::Shutdown::Write,
                     *error_code,
                 ) {
-                    println!("can't send reset_stream: {}", e);
+                    log::error!("can't send reset_stream: {}", e);
                 }
             },
 
@@ -176,9 +181,10 @@ impl Action {
                 stream_id,
                 error_code,
             } => {
-                println!(
+                log::debug!(
                     "stop_sending stream id={} error_code={}",
-                    stream_id, error_code
+                    stream_id,
+                    error_code
                 );
 
                 if let Err(e) = conn.stream_shutdown(
@@ -186,7 +192,7 @@ impl Action {
                     quiche::Shutdown::Read,
                     *error_code,
                 ) {
-                    println!("can't send stop_sending: {}", e);
+                    log::error!("can't send stop_sending: {}", e);
                 }
             },
         }

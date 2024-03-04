@@ -18,10 +18,7 @@ use buffer_pool::Pool;
 use buffer_pool::Pooled;
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
-use tokio::select;
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio_quiche::http3::driver::H3ConnectionError;
 use tokio_quiche::BoxError;
 use tokio_quiche::QuicResult;
@@ -30,9 +27,7 @@ use foundations::telemetry::log;
 use qlog::events::h3::H3FrameParsed;
 use qlog::events::h3::Http3Frame;
 use qlog::events::EventData;
-use tokio_quiche::metrics::Metrics;
 use tokio_quiche::quic::connection::ApplicationOverQuic;
-use tokio_quiche::quic::connection::TidyUpBehavior;
 use tokio_quiche::quiche::Config as QConfig;
 use tokio_quiche::settings::MtuConfig;
 use tokio_quiche::Config;
@@ -222,7 +217,7 @@ impl ApplicationOverQuic for H3iDriver {
 
             match qconn.stream_recv(stream, &mut d) {
                 Ok((len, _fin)) => {
-                    println!("read {} stream bytes", len);
+                    log::trace!("read {} stream bytes", len);
                     let mut tlv = VarintTlv::with_slice(&d[..len]).unwrap();
                     loop {
                         let frame_ty = tlv
@@ -231,7 +226,7 @@ impl ApplicationOverQuic for H3iDriver {
                         let frame_len = tlv
                             .len()
                             .expect("not enough bytes to read frame length");
-                        println!("tlv ty={frame_ty} len={frame_len}");
+                        log::debug!("tlv ty={frame_ty} len={frame_len}");
                         let frame_val = tlv
                             .val()
                             .expect("not enough bytes to read frame payload");
@@ -245,7 +240,7 @@ impl ApplicationOverQuic for H3iDriver {
 
                         stream_map.insert(&stream, frame.clone());
 
-                        println!("frame rx={frame:?} off={}", tlv.off());
+                        log::debug!("frame rx={frame:?} off={}", tlv.off());
 
                         match frame {
                             quiche::h3::frame::Frame::Headers {
@@ -256,7 +251,7 @@ impl ApplicationOverQuic for H3iDriver {
                                 let headers = qpack_decoder
                                     .decode(&header_block, u64::MAX)
                                     .unwrap();
-                                println!("hdrs={:?}", headers);
+                                log::trace!("hdrs={:?}", headers);
 
                                 let qlog_headers = headers
                                     .iter()
@@ -301,7 +296,7 @@ impl ApplicationOverQuic for H3iDriver {
                         }
 
                         if tlv.off() == len {
-                            println!("read all buffer");
+                            log::trace!("read all buffer");
                             break;
                         }
 
@@ -309,7 +304,7 @@ impl ApplicationOverQuic for H3iDriver {
                     }
                 },
 
-                Err(e) => println!("stream read error: {e}"),
+                Err(e) => log::error!("stream read error: {e}"),
             }
         }
 
@@ -337,12 +332,12 @@ impl ApplicationOverQuic for H3iDriver {
 
         let stream_map = self.stream_map.as_mut().unwrap();
 
-        log::trace!("process_writes");
         // TODO: skipping is currently unnecessary sine we'll only flush once. if we want to stay
         // with single flushes, we an drop it, if we want to do multi-flushes (will require changes
         // in h3i core) we'll have to skip up to the next flush action
+        //
+        // If we receive a Wait, we should break out of process_writes and wait in wait_for_data
         for action in self.actions.iter().skip(self.actions_executed) {
-            // TODO: Action { stream_id: u64, action: ActionInner }
             match action {
                 Action::SendFrame { stream_id, .. }
                 | Action::StreamBytes { stream_id, .. }
@@ -365,9 +360,9 @@ impl ApplicationOverQuic for H3iDriver {
     ) -> QuicResult<()> {
         // TODO: have to kill the tasks gracefully
         // It seems that in binary mode, leaving the tasks up will make the program hang since
-        // tokio won't close if there are running tasks
+        // tokio won't close if there are running tasks?
         if self.sent_map() || qconn.is_closed() {
-            // TODO: actual error
+            // TODO: cleanly cancel the tasks
             return Err(Box::new(H3ConnectionError::ServerWentAway));
         } else {
             Ok(())
@@ -386,7 +381,6 @@ impl ApplicationOverQuic for H3iDriver {
 /// TODO: this may have to support QUIC frames as well, e.g. CONNECTION-CLOSE
 #[derive(Clone, Debug)]
 pub struct StreamMap {
-    // TODO: do we want to store the absolute frame ordering as well?
     inner: HashMap<u64, Vec<Frame>>,
 }
 
@@ -401,6 +395,7 @@ impl StreamMap {
         self.inner.get(&stream_id)
     }
 
+    // TODO: doesn't handle server-initialized streams, combine insert and initialize
     fn initialize_stream(&mut self, stream_id: &u64) {
         self.inner.insert(*stream_id, vec![]);
     }

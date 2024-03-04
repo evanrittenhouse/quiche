@@ -17,12 +17,6 @@ async fn main() {
         .default_format_timestamp_nanos(true)
         .init();
 
-    let mut settings: TelemetrySettings = Default::default();
-    settings.logging.verbosity =
-        LogVerbosity(foundations::telemetry::settings::Level::Trace);
-
-    let _ = foundations::telemetry::init(&service_info!(), &settings);
-
     let config = match AppConfig::from_clap() {
         Ok(v) => v,
 
@@ -32,33 +26,28 @@ async fn main() {
         },
     };
 
+    let mut settings: TelemetrySettings = Default::default();
+    settings.logging.verbosity = config.log_verbosity.unwrap();
+    let _ = foundations::telemetry::init(&service_info!(), &settings);
+
     let frame_actions = match &config.qlog_input {
         Some(v) => read_qlog(v),
         None => prompt_frames(&config),
     };
 
-    // 1. get a list of actions somehow
-    //      - parsing a qlog file
-    //      - parsing a PCAP or something
-    // 2. connect the client
-    //      - don't need channels or anything since the actions are pre-determined at client
-    //        connection
+    let frame_rx = h3i::tq_client::tq_connect(&config, frame_actions).await;
+    let received_frames = frame_rx.unwrap().await.unwrap();
 
-    let stream_map_rx = h3i::tq_client::tq_connect(&config, frame_actions).await;
-    let stream_map = stream_map_rx.unwrap().await.unwrap();
-
-    log::info!("received stream map: {:?}", stream_map);
+    log::info!("Received stream map: {:?}", received_frames);
 
     log::info!(
         "for some reason asserts aren't working, so...: {}",
-        stream_map
-            .get(0)
-            .unwrap_or(&vec![])
-            .iter()
-            .any(|frame| match frame {
+        received_frames.get(0).unwrap_or(&vec![]).iter().any(
+            |frame| match frame {
                 Frame::Headers { .. } => true,
                 _ => false,
-            })
+            }
+        )
     );
 }
 

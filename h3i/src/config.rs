@@ -1,5 +1,9 @@
+use std::str::FromStr;
+
 use clap::App;
 use clap::Arg;
+use foundations::telemetry::settings::Level;
+use foundations::telemetry::settings::LogVerbosity;
 
 pub struct AppConfig {
     pub host_port: String,
@@ -8,6 +12,7 @@ pub struct AppConfig {
     pub verify_peer: bool,
     pub qlog_input: Option<String>,
     pub seperate_qlog_output: bool,
+    pub log_verbosity: Option<LogVerbosity>,
 }
 
 impl AppConfig {
@@ -24,7 +29,7 @@ impl AppConfig {
             .arg(
                 Arg::with_name("connect-to")
                     .long("connect-to")
-                    .help("Override ther server's address.")
+                    .help("Override the server's address.")
                     .takes_value(true),
             )
             .arg(
@@ -36,6 +41,12 @@ impl AppConfig {
                 Arg::with_name("qlog-input")
                     .long("qlog-input")
                     .help("Drive connection via qlog rather than cli.")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("log-verbosity")
+                    .long("log-verbosity")
+                    .help("The level of logging verbosity. Defaults to INFO.")
                     .takes_value(true),
             )
             .get_matches();
@@ -53,6 +64,12 @@ impl AppConfig {
                 .map(|s| s.to_string())
         });
 
+        let log_verbosity = matches.value_of("log-verbosity").and_then(|v| {
+            Some(
+                LogVerbosity(Level::from_str(v).expect("Please enter one of: CRITICAL, ERROR, WARNING, INFO, DEBUG, TRACE")),
+            )
+        }).or(Some(LogVerbosity::default()));
+
         let config = Self {
             host_port,
             connect_to,
@@ -60,6 +77,7 @@ impl AppConfig {
             verify_peer,
             qlog_input,
             seperate_qlog_output: true,
+            log_verbosity,
         };
 
         Ok(config)
