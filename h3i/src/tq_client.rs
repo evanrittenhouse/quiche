@@ -19,6 +19,7 @@ use buffer_pool::Pooled;
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 use tokio_quiche::http3::driver::H3ConnectionError;
 use tokio_quiche::BoxError;
 use tokio_quiche::QuicResult;
@@ -154,6 +155,9 @@ pub struct H3iDriver {
     stream_map: Option<StreamMap>,
     /// Sends the [StreamMap] back to the user on completion.
     stream_map_tx: Option<oneshot::Sender<StreamMap>>,
+    /// When the next action should fire. A value of [None] means it should fire at the next
+    /// available moment.
+    next_fire_time: Option<Instant>,
 }
 
 impl H3iDriver {
@@ -166,6 +170,7 @@ impl H3iDriver {
                 actions_executed: 0,
                 stream_map: Some(StreamMap::new()),
                 stream_map_tx: Some(stream_map_tx),
+                next_fire_time: None,
             },
             stream_map_rx,
         )
@@ -176,11 +181,17 @@ impl H3iDriver {
         self.stream_map.is_none() || self.stream_map_tx.is_none()
     }
 
-    // TODO: needed?
-    fn stream_map_mut(&mut self) -> Result<&mut StreamMap, BoxError> {
-        self.stream_map
-            .as_mut()
-            .ok_or(Box::new(quiche::Error::Done))
+    /// If all actions have been completed.
+    fn actions_complete(&self) -> bool {
+        self.actions_executed == self.actions.len()
+    }
+
+    fn should_fire(&self) -> bool {
+        if let Some(time) = self.next_fire_time {
+            Instant::now() >= time
+        } else {
+            true
+        }
     }
 }
 
@@ -238,7 +249,7 @@ impl ApplicationOverQuic for H3iDriver {
                         )
                         .unwrap();
 
-                        stream_map.insert(&stream, frame.clone());
+                        stream_map.insert_frame(&stream, frame.clone());
 
                         log::debug!("frame rx={frame:?} off={}", tlv.off());
 
@@ -308,7 +319,7 @@ impl ApplicationOverQuic for H3iDriver {
             }
         }
 
-        if stream_map.is_full() {
+        if stream_map.is_full() && self.actions_complete() {
             let _ = self
                 .stream_map_tx
                 .take()
@@ -337,7 +348,9 @@ impl ApplicationOverQuic for H3iDriver {
         // in h3i core) we'll have to skip up to the next flush action
         //
         // If we receive a Wait, we should break out of process_writes and wait in wait_for_data
-        for action in self.actions.iter().skip(self.actions_executed) {
+        for action in &self.actions[self.actions_executed..] {
+            let should_fire = self.should_fire();
+
             match action {
                 Action::SendFrame { stream_id, .. }
                 | Action::StreamBytes { stream_id, .. }
@@ -345,11 +358,27 @@ impl ApplicationOverQuic for H3iDriver {
                 | Action::StopSending { stream_id, .. }
                 | Action::OpenUniStream { stream_id, .. }
                 | Action::SendHeadersFrame { stream_id, .. } => {
-                    stream_map.initialize_stream(stream_id)
+                    if should_fire {
+                        // Ensure that we fire the next action.
+                        self.next_fire_time = None;
+                        self.stream_map
+                            .as_mut()
+                            .expect("gonna have to deal with this :)")
+                            .initialize_stream(&stream_id);
+
+                        action.execute(qconn);
+                        self.actions_executed += 1;
+                    } else {
+                        break;
+                    }
+                },
+                Action::Wait { duration } => {
+                    self.next_fire_time = Some(Instant::now() + *duration);
+                    self.actions_executed += 1;
+
+                    break;
                 },
             }
-            action.execute(qconn);
-            self.actions_executed += 1;
         }
 
         Ok(())
@@ -395,16 +424,13 @@ impl StreamMap {
         self.inner.get(&stream_id)
     }
 
-    // TODO: doesn't handle server-initialized streams, combine insert and initialize
     fn initialize_stream(&mut self, stream_id: &u64) {
         self.inner.insert(*stream_id, vec![]);
     }
 
-    fn insert(&mut self, stream_id: &u64, frame: Frame) {
-        self.inner
-            .get_mut(stream_id)
-            .expect(&format!("Stream {stream_id} was never initialized"))
-            .push(frame)
+    fn insert_frame(&mut self, stream_id: &u64, frame: Frame) {
+        // Potentially initialize streams on read as well in case the server initializes a stream.
+        self.inner.entry(*stream_id).or_insert(vec![]).push(frame)
     }
 
     fn is_full(&self) -> bool {

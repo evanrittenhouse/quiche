@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::quiche;
 use crate::quiche::h3::frame::Frame;
 use inquire::error::InquireResult;

@@ -14,6 +14,7 @@ use crate::h3::prompts::headers::prompt_push_promise;
 use crate::StreamIdAllocator;
 
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use self::stream::prompt_fin_stream;
 
@@ -60,6 +61,7 @@ const RESET_STREAM: &str = "reset_stream";
 const STOP_SENDING: &str = "stop_sending";
 const FLUSH: &str = "flush";
 const QUIT: &str = "quit";
+const WAIT: &str = "wait";
 
 enum PromptOutcome {
     Action(Action),
@@ -103,6 +105,7 @@ impl Prompter {
             MAX_PUSH_ID => prompt_max_push_id(),
             CANCEL_PUSH => prompt_cancel_push(),
             PUSH_PROMISE => prompt_push_promise(),
+            WAIT => prompt_wait(),
             PRIORITY_UPDATE => priority::prompt_priority(),
             FLUSH => return PromptOutcome::Flush,
             QUIT => return PromptOutcome::Clear,
@@ -354,6 +357,15 @@ pub fn prompt_extension() -> InquireResult<Action> {
             raw_type,
             payload: payload.into(),
         },
+    };
+
+    Ok(action)
+}
+
+pub fn prompt_wait() -> InquireResult<Action> {
+    let millis = prompts::prompt_varint("duration to wait (mililseconds):")?;
+    let action = Action::Wait {
+        duration: Duration::from_millis(millis),
     };
 
     Ok(action)

@@ -62,6 +62,10 @@ pub enum Action {
         stream_id: u64,
         error_code: u64,
     },
+
+    Wait {
+        duration: Duration,
+    },
 }
 
 impl Action {
@@ -195,6 +199,8 @@ impl Action {
                     log::error!("can't send stop_sending: {}", e);
                 }
             },
+
+            _ => {},
         }
     }
 
@@ -337,6 +343,9 @@ impl Action {
                     }]));
                 vec![(ev, BTreeMap::new())]
             },
+
+            // TODO: how can we best link a Wait action to a qlog
+            _ => vec![],
         }
     }
 
