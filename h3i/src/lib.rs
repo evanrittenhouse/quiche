@@ -98,3 +98,60 @@ pub mod config;
 pub mod h3;
 mod tlv;
 pub mod tq_client;
+
+#[cfg(test)]
+mod tests {
+    use tokio_quiche::quiche::h3::frame::Frame;
+    use tokio_quiche::quiche::h3::Header;
+
+    use crate::{h3::actions::Action, *};
+
+    #[tokio::test]
+    async fn test_wait() -> std::io::Result<()> {
+        let config = config::AppConfig {
+            host_port: "127.0.0.1:8085".to_owned(),
+            connect_to: None,
+            source_port: 0,
+            verify_peer: true,
+            qlog_input: None,
+            seperate_qlog_output: false,
+            log_verbosity: None,
+        };
+
+        let headers = vec![
+            Header::new(b":method", b"GET"),
+            Header::new(b":authority", b"127.0.0.1:8085"),
+            Header::new(b":path", b"/"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b"test", b"evan"),
+        ];
+        let headers1 = headers.clone();
+        let header_block = encode_header_block(&headers).unwrap();
+        let header_block1 = encode_header_block(&headers).unwrap();
+
+        let stream_id = 0;
+        let actions = vec![
+            Action::SendHeadersFrame {
+                stream_id,
+                fin_stream: false,
+                headers,
+                frame: Frame::Headers { header_block },
+            },
+            Action::SendHeadersFrame {
+                stream_id: 4,
+                fin_stream: false,
+                headers: headers1,
+                frame: Frame::Headers {
+                    header_block: header_block1,
+                },
+            },
+        ];
+
+        let frame_rx = tq_client::tq_connect(&config, actions).await;
+        let received_frames = frame_rx.unwrap().await.unwrap();
+
+        println!("stream_map: {:?}", received_frames);
+
+        Ok(())
+    }
+}

@@ -168,6 +168,7 @@ impl<'a> VarintTlv<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_quiche::quiche;
 
     #[test]
     fn test_tlv() {

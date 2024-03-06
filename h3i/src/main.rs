@@ -8,7 +8,6 @@ use h3i::config::AppConfig;
 use h3i::h3::actions::Action;
 use h3i::h3::prompts::Prompter;
 use qlog::reader::QlogSeqReader;
-use std::io::Result;
 use tokio_quiche::quiche::h3::frame::Frame;
 
 #[tokio::main]
@@ -38,7 +37,7 @@ async fn main() {
     let frame_rx = h3i::tq_client::tq_connect(&config, frame_actions).await;
     let received_frames = frame_rx.unwrap().await.unwrap();
 
-    log::info!("Received stream map: {:?}", received_frames);
+    log::info!("received stream map: {:?}", received_frames);
 
     log::info!(
         "for some reason asserts aren't working, so...: {}",

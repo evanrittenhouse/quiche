@@ -18,10 +18,10 @@ use buffer_pool::Pool;
 use buffer_pool::Pooled;
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
+use std::task::Poll;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio_quiche::http3::driver::H3ConnectionError;
-use tokio_quiche::BoxError;
 use tokio_quiche::QuicResult;
 
 use foundations::telemetry::log;
@@ -78,6 +78,8 @@ pub async fn tq_connect(
     quiche_config.set_initial_max_streams_uni(100);
     quiche_config.set_disable_active_migration(true);
     quiche_config.set_active_connection_id_limit(0);
+    quiche_config.verify_peer(false);
+
     let config = Config {
         quiche_config,
         disable_client_ip_validation: true,
@@ -92,10 +94,8 @@ pub async fn tq_connect(
         pacing_offload: false,
         enable_expensive_packet_count_metrics: false,
         has_gro: false,
-        capture_quiche_logs: false,
+        capture_quiche_logs: true,
     };
-
-    log::info!("made config");
 
     let connect_url = args.host_port.split(':').next().unwrap();
 
@@ -120,19 +120,12 @@ pub async fn tq_connect(
         std::net::SocketAddr::V6(_) => format!("[::]:{}", args.source_port),
     };
 
-    // TODO: get rid of unwrap()s, coerce ClientError to something that TQ can
-    // speak
     let socket = tokio::net::UdpSocket::bind(bind_addr).await.unwrap();
     socket.connect(peer_addr).await.unwrap();
-
     log::info!("connected to socket");
 
-    log::debug!(
-        "creating quic connection";
-        "local_addr"=>socket.local_addr().unwrap(),
-        "peer_addr"=>socket.peer_addr().unwrap(),
-    );
-
+    let local = socket.local_addr().unwrap();
+    let peer = socket.peer_addr().unwrap();
     let (h3i, stream_map_rx) = H3iDriver::new(frame_actions);
     let _ = tokio_quiche::quic::connect_with_config(
         socket,
@@ -142,8 +135,11 @@ pub async fn tq_connect(
     )
     .await
     .unwrap();
-
-    log::info!("now what?");
+    log::debug!(
+        "quic connection created";
+        "local_addr"=>local,
+        "peer_addr"=>peer
+    );
 
     Ok(stream_map_rx)
 }
@@ -158,6 +154,8 @@ pub struct H3iDriver {
     /// When the next action should fire. A value of [None] means it should fire at the next
     /// available moment.
     next_fire_time: Option<Instant>,
+    /// If the [quiche::Connection] is established
+    qconn_established: bool,
 }
 
 impl H3iDriver {
@@ -171,6 +169,7 @@ impl H3iDriver {
                 stream_map: Some(StreamMap::new()),
                 stream_map_tx: Some(stream_map_tx),
                 next_fire_time: None,
+                qconn_established: false,
             },
             stream_map_rx,
         )
@@ -186,6 +185,7 @@ impl H3iDriver {
         self.actions_executed == self.actions.len()
     }
 
+    /// If the next action should fire.
     fn should_fire(&self) -> bool {
         if let Some(time) = self.next_fire_time {
             Instant::now() >= time
@@ -198,14 +198,15 @@ impl H3iDriver {
 #[async_trait]
 impl ApplicationOverQuic for H3iDriver {
     fn on_conn_established(
-        &mut self, qconn: &mut quiche::Connection,
+        &mut self, _qconn: &mut quiche::Connection,
     ) -> QuicResult<()> {
-        log::info!("connection established");
+        log::trace!("H3iDriver connection established");
+        self.qconn_established = true;
         Ok(())
     }
 
     fn should_act(&self) -> bool {
-        true
+        self.qconn_established
     }
 
     fn process_reads(
@@ -331,7 +332,7 @@ impl ApplicationOverQuic for H3iDriver {
     }
 
     fn process_writes(
-        &mut self, qconn: &mut quiche::Connection, fresh: Option<u64>,
+        &mut self, qconn: &mut quiche::Connection, _fresh: Option<u64>,
     ) -> QuicResult<()> {
         if self.actions_executed == self.actions.len() {
             return Ok(());
@@ -341,13 +342,9 @@ impl ApplicationOverQuic for H3iDriver {
             return Ok(());
         }
 
-        let stream_map = self.stream_map.as_mut().unwrap();
-
         // TODO: skipping is currently unnecessary sine we'll only flush once. if we want to stay
         // with single flushes, we an drop it, if we want to do multi-flushes (will require changes
         // in h3i core) we'll have to skip up to the next flush action
-        //
-        // If we receive a Wait, we should break out of process_writes and wait in wait_for_data
         for action in &self.actions[self.actions_executed..] {
             let should_fire = self.should_fire();
 
@@ -361,9 +358,10 @@ impl ApplicationOverQuic for H3iDriver {
                     if should_fire {
                         // Ensure that we fire the next action.
                         self.next_fire_time = None;
+
                         self.stream_map
                             .as_mut()
-                            .expect("gonna have to deal with this :)")
+                            .expect("stream map is None")
                             .initialize_stream(&stream_id);
 
                         action.execute(qconn);
@@ -387,15 +385,19 @@ impl ApplicationOverQuic for H3iDriver {
     async fn wait_for_data(
         &mut self, qconn: &mut quiche::Connection,
     ) -> QuicResult<()> {
-        // TODO: have to kill the tasks gracefully
-        // It seems that in binary mode, leaving the tasks up will make the program hang since
-        // tokio won't close if there are running tasks?
-        if self.sent_map() || qconn.is_closed() {
-            // TODO: cleanly cancel the tasks
-            return Err(Box::new(H3ConnectionError::ServerWentAway));
-        } else {
-            Ok(())
-        }
+        // Necessary for killing tasks when running in binary mode, since the Tokio runtime
+        // will stay alive so long as the tokio-quiche IoWorker/InboundPacketRouter lives.
+        //
+        // We can't just insta-return Ok(()) because that will starve the packet receipt arm in the
+        // IoWorker select! loop.
+        Err(std::future::poll_fn(|_| {
+            if self.sent_map() || qconn.is_closed() {
+                return Poll::Ready(Box::new(H3ConnectionError::ServerWentAway));
+            } else {
+                return Poll::Pending;
+            }
+        })
+        .await)
     }
 
     fn buffer(&mut self) -> &mut Pooled<ConsumeBuffer> {
@@ -403,11 +405,8 @@ impl ApplicationOverQuic for H3iDriver {
     }
 }
 
-// This may not have to be a separate struct at all, if we populate it in the awaited task
-/// Tracks the streams initialized by sending frames and the frames received over those streams in
-/// response.
-///
-/// TODO: this may have to support QUIC frames as well, e.g. CONNECTION-CLOSE
+// TODO: convert this into an UnboundedReceiver that the user can poll, with perhaps the option to
+// aggregate everything into a full connection-level view.
 #[derive(Clone, Debug)]
 pub struct StreamMap {
     inner: HashMap<u64, Vec<Frame>>,

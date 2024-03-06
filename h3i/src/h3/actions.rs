@@ -1,5 +1,6 @@
 use crate::quiche;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use foundations::telemetry::log;
 use qlog::events::h3::H3FrameCreated;
