@@ -34,20 +34,10 @@ async fn main() {
         None => prompt_frames(&config),
     };
 
-    let frame_rx = h3i::tq_client::tq_connect(&config, frame_actions).await;
+    let frame_rx = h3i::client::connect(&config, frame_actions).await;
     let received_frames = frame_rx.unwrap().await.unwrap();
 
     log::info!("received stream map: {:?}", received_frames);
-
-    log::info!(
-        "for some reason asserts aren't working, so...: {}",
-        received_frames.get(0).unwrap_or(&vec![]).iter().any(
-            |frame| match frame {
-                Frame::Headers { .. } => true,
-                _ => false,
-            }
-        )
-    );
 }
 
 fn read_qlog(filename: &str) -> Vec<Action> {
@@ -67,8 +57,6 @@ fn read_qlog(filename: &str) -> Vec<Action> {
             qlog::reader::Event::Json(_ev) => unimplemented!(),
         }
     }
-
-    // println!("action = {:?}", actions);
 
     actions
 }

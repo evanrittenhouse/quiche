@@ -1,20 +1,53 @@
-use std::net::ToSocketAddrs;
+use crate::quiche;
 
+use async_trait::async_trait;
+use buffer_pool::ConsumeBuffer;
+use buffer_pool::Pool;
+use buffer_pool::Pooled;
+use std::collections::HashMap;
+use std::net::ToSocketAddrs;
+use std::task::Poll;
+use tokio::sync::oneshot;
+use tokio::time::Instant;
+use tokio_quiche::http3::driver::H3ConnectionError;
+use tokio_quiche::QuicResult;
+
+use foundations::telemetry::log;
 use qlog::events::h3::H3FrameParsed;
 use qlog::events::h3::Http3Frame;
 use qlog::events::EventData;
+use tokio_quiche::quic::connection::ApplicationOverQuic;
 use tokio_quiche::quiche::Config as QConfig;
 use tokio_quiche::settings::MtuConfig;
 use tokio_quiche::Config;
 
 use crate::config::AppConfig;
 use crate::h3::actions::Action;
-use crate::quiche;
-use crate::tlv::VarintTlv;
 
+use crate::tlv::VarintTlv;
+use quiche::h3::frame::Frame;
 use quiche::h3::NameValue;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
+const DATAGRAM_POOL_SIZE: usize = 64 * 1024;
+const POOL_SIZE: usize = 16 * 1024;
+const POOL_SHARDS: usize = 8;
+pub const MAX_POOL_BUF_SIZE: usize = 64 * 1024;
+
+// TODO: QLOGDIR/SSLKEYLOGFILE support in tokio-quiche
+//      - SSLKEYLOGFILE: FLPROTO-2329
+//      - QLOGDIR: CLIENT-9692
+// TODO: do we have to support QUIC frames/arbitrary binary/DGRAMs in response as well?
+// TODO: Need to move away from the single-flush assumption (may need to rethink how StreamMap is populated and sent)
+//   - Left out because that's how h3i currently functions, though it should definitely be extended
+// TODO: would be cool to add ability to write to a PCAP
+
+/// A generic buffer pool used to pass data around.
+pub static BUF_POOL: Pool<POOL_SHARDS, ConsumeBuffer> =
+    Pool::<POOL_SHARDS, _>::new(POOL_SIZE, MAX_POOL_BUF_SIZE);
+/// A datagram pool shared for both UDP streams, and incoming QUIC packets.
+pub static DATAGRAM_POOL: Pool<POOL_SHARDS, ConsumeBuffer> =
+    Pool::<POOL_SHARDS, _>::new(DATAGRAM_POOL_SIZE, MAX_DATAGRAM_SIZE);
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -23,20 +56,43 @@ pub enum ClientError {
     Other(String),
 }
 
-pub fn connect(
-    args: &AppConfig, frame_actions: &[Action],
-) -> std::result::Result<(), ClientError> {
-    let mut buf = [0; 65535];
-    let mut out = [0; MAX_DATAGRAM_SIZE];
+/// Connect to the socket.
+pub async fn connect(
+    args: &AppConfig, frame_actions: Vec<Action>,
+) -> std::result::Result<oneshot::Receiver<StreamMap>, ClientError> {
+    let mut quiche_config = QConfig::new(1).unwrap();
+    quiche_config.verify_peer(args.verify_peer);
+    quiche_config.set_application_protos(&[b"h3"]).unwrap();
+    quiche_config.set_max_idle_timeout(5000);
+    quiche_config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+    quiche_config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+    quiche_config.set_initial_max_data(10_000_000);
+    quiche_config.set_initial_max_stream_data_bidi_local(1_000_000);
+    quiche_config.set_initial_max_stream_data_bidi_remote(1_000_000);
+    quiche_config.set_initial_max_stream_data_uni(1_000_000);
+    quiche_config.set_initial_max_streams_bidi(100);
+    quiche_config.set_initial_max_streams_uni(100);
+    quiche_config.set_disable_active_migration(true);
+    quiche_config.set_active_connection_id_limit(0);
+    quiche_config.verify_peer(false);
 
-    // let output_sink =
-    // Rc::new(RefCell::new(output_sink)) as Rc<RefCell<dyn FnMut(_)>>;
+    let config = Config {
+        quiche_config,
+        disable_client_ip_validation: true,
+        mtu: MtuConfig {
+            size: 1200,
+            gso: false,
+        },
+        // qlog_dir: std::env::var_os("QLOGDIR").map_or(None, |s| Some(s.into())),
+        qlog_dir: None,
+        check_udp_drop: false,
+        check_rx_delay: false,
+        pacing_offload: false,
+        enable_expensive_packet_count_metrics: false,
+        has_gro: false,
+        capture_quiche_logs: true,
+    };
 
-    // Setup the event loop.
-    let mut poll = mio::Poll::new().unwrap();
-    let mut events = mio::Events::with_capacity(1024);
-
-    // We'll only connect to one server.
     let connect_url = args.host_port.split(':').next().unwrap();
 
     // Resolve server address.
@@ -60,450 +116,310 @@ pub fn connect(
         std::net::SocketAddr::V6(_) => format!("[::]:{}", args.source_port),
     };
 
-    // Create the UDP socket backing the QUIC connection, and register it with
-    // the event loop.
-    let mut socket =
-        mio::net::UdpSocket::bind(bind_addr.parse().unwrap()).unwrap();
-    poll.registry()
-        .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
-        .unwrap();
+    let socket = tokio::net::UdpSocket::bind(bind_addr).await.unwrap();
+    socket.connect(peer_addr).await.unwrap();
+    log::info!("connected to socket");
 
-    // Create the configuration for the QUIC connection.
-    let mut config = quiche::Config::new(1).unwrap();
-
-    // if let Some(ref trust_origin_ca_pem) = args.trust_origin_ca_pem {
-    //    config
-    //        .load_verify_locations_from_file(trust_origin_ca_pem)
-    //        .map_err(|e| {
-    //            ClientError::Other(format!(
-    //                "error loading origin CA file : {}",
-    //                e
-    //            ))
-    //        })?;
-    //} else {
-    config.verify_peer(args.verify_peer);
-    //}
-    config.set_application_protos(&[b"h3"]).unwrap();
-
-    config.set_max_idle_timeout(5000);
-    config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
-    config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-    config.set_initial_max_data(10_000_000);
-    config.set_initial_max_stream_data_bidi_local(1_000_000);
-    config.set_initial_max_stream_data_bidi_remote(1_000_000);
-    config.set_initial_max_stream_data_uni(1_000_000);
-    config.set_initial_max_streams_bidi(100);
-    config.set_initial_max_streams_uni(100);
-    config.set_disable_active_migration(true);
-    config.set_active_connection_id_limit(0);
-
-    // config.set_max_connection_window(conn_args.max_window);
-    // config.set_max_stream_window(conn_args.max_stream_window);
-
-    let mut keylog = None;
-
-    if let Some(keylog_path) = std::env::var_os("SSLKEYLOGFILE") {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(keylog_path)
-            .unwrap();
-
-        keylog = Some(file);
-
-        config.log_keys();
-    }
-
-    config.grease(false);
-
-    let mut app_proto_selected = false;
-
-    // Generate a random source connection ID for the connection.
-    let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut scid);
-
-    let scid = quiche::ConnectionId::from_ref(&scid);
-
-    let local_addr = socket.local_addr().unwrap();
-
-    // Create a QUIC connection and initiate handshake.
-    let mut conn = quiche::connect(
+    let local = socket.local_addr().unwrap();
+    let peer = socket.peer_addr().unwrap();
+    let (h3i, stream_map_rx) = H3iDriver::new(frame_actions);
+    let _ = tokio_quiche::quic::connect_with_config(
+        socket,
         Some(connect_url),
-        &scid,
-        local_addr,
-        peer_addr,
-        &mut config,
+        config,
+        h3i,
     )
+    .await
     .unwrap();
-
-    if let Some(keylog) = &mut keylog {
-        if let Ok(keylog) = keylog.try_clone() {
-            conn.set_keylog(Box::new(keylog));
-        }
-    }
-
-    if let Some(dir) = std::env::var_os("QLOGDIR") {
-        let id = format!("{scid:?}");
-        let writer = make_qlog_writer(&dir, "client", &id);
-
-        conn.set_qlog(
-            std::boxed::Box::new(writer),
-            "h3i-client qlog".to_string(),
-            format!("{} id={}", "quiche-client qlog", id),
-        );
-    }
-
-    println!(
-        "connecting to {:} from {:} with scid {:?}",
-        peer_addr,
-        socket.local_addr().unwrap(),
-        scid,
+    log::debug!(
+        "quic connection created";
+        "local_addr"=>local,
+        "peer_addr"=>peer
     );
 
-    let (write, send_info) = conn.send(&mut out).expect("initial send failed");
+    Ok(stream_map_rx)
+}
 
-    while let Err(e) = socket.send_to(&out[..write], send_info.to) {
-        if e.kind() == std::io::ErrorKind::WouldBlock {
-            println!(
-                "{} -> {}: send() would block",
-                socket.local_addr().unwrap(),
-                send_info.to
-            );
-            continue;
-        }
+pub struct H3iDriver {
+    buffer: Pooled<ConsumeBuffer>,
+    actions: Vec<Action>,
+    actions_executed: usize,
+    stream_map: Option<StreamMap>,
+    /// Sends the [StreamMap] back to the user on completion.
+    stream_map_tx: Option<oneshot::Sender<StreamMap>>,
+    /// The minimum time at which the next action should fire.  
+    next_fire_time: Instant,
+    /// If the [quiche::Connection] is established
+    qconn_established: bool,
+}
 
-        return Err(ClientError::Other(format!("send() failed: {e:?}")));
+impl H3iDriver {
+    fn new(actions: Vec<Action>) -> (Self, oneshot::Receiver<StreamMap>) {
+        let (stream_map_tx, stream_map_rx) = oneshot::channel();
+        (
+            Self {
+                buffer: BUF_POOL.get_with(|d| d.expand(MAX_POOL_BUF_SIZE)),
+                actions,
+                actions_executed: 0,
+                stream_map: Some(StreamMap::new()),
+                stream_map_tx: Some(stream_map_tx),
+                next_fire_time: Instant::now(),
+                qconn_established: false,
+            },
+            stream_map_rx,
+        )
     }
 
-    // println!("written {}", write);
+    /// If the [StreamMap] has been sent back to the user.
+    fn sent_map(&self) -> bool {
+        self.stream_map.is_none() || self.stream_map_tx.is_none()
+    }
 
-    let app_data_start = std::time::Instant::now();
+    /// If all actions have been completed.
+    fn actions_complete(&self) -> bool {
+        self.actions_executed == self.actions.len()
+    }
 
-    let mut action_iter = frame_actions.iter();
+    /// If the next action should fire.
+    fn should_fire(&self) -> bool {
+        Instant::now() >= self.next_fire_time
+    }
+}
 
-    loop {
-        if !conn.is_in_early_data() || app_proto_selected {
-            poll.poll(&mut events, conn.timeout()).unwrap();
+#[async_trait]
+impl ApplicationOverQuic for H3iDriver {
+    fn on_conn_established(
+        &mut self, _qconn: &mut quiche::Connection,
+    ) -> QuicResult<()> {
+        log::trace!("H3iDriver connection established");
+        self.qconn_established = true;
+        Ok(())
+    }
+
+    fn should_act(&self) -> bool {
+        self.qconn_established
+    }
+
+    fn process_reads(
+        &mut self, qconn: &mut quiche::Connection,
+    ) -> QuicResult<()> {
+        if self.sent_map() {
+            // If we've already sent the StreamMap to the user, we can skip all the work here
+            return Ok(());
         }
 
-        // If the event loop reported no events, it means that the timeout
-        // has expired, so handle it without attempting to read packets. We
-        // will then proceed with the send loop.
-        if events.is_empty() {
-            // println!("timed out");
+        let stream_map = self.stream_map.as_mut().unwrap();
 
-            conn.on_timeout();
-        }
+        for stream in qconn.readable() {
+            // TODO: ignoring control streams
+            if stream % 4 != 0 {
+                continue;
+            }
 
-        // Read incoming UDP packets from the socket and feed them to quiche,
-        // until there are no more packets to read.
-        for event in &events {
-            let socket = match event.token() {
-                mio::Token(0) => &socket,
+            let mut d = [42; 16000];
 
-                // mio::Token(1) => migrate_socket.as_ref().unwrap(),
-                _ => unreachable!(),
-            };
+            match qconn.stream_recv(stream, &mut d) {
+                Ok((len, _fin)) => {
+                    log::trace!("read {} stream bytes", len);
+                    let mut tlv = VarintTlv::with_slice(&d[..len]).unwrap();
+                    loop {
+                        let frame_ty = tlv
+                            .ty()
+                            .expect("not enough bytes to read frame type");
+                        let frame_len = tlv
+                            .len()
+                            .expect("not enough bytes to read frame length");
+                        log::debug!("tlv ty={frame_ty} len={frame_len}");
+                        let frame_val = tlv
+                            .val()
+                            .expect("not enough bytes to read frame payload");
 
-            let local_addr = socket.local_addr().unwrap();
-            'read: loop {
-                let (len, from) = match socket.recv_from(&mut buf) {
-                    Ok(v) => v,
+                        let frame = quiche::h3::frame::Frame::from_bytes(
+                            frame_ty,
+                            frame_len,
+                            frame_val.buf(),
+                        )
+                        .unwrap();
 
-                    Err(e) => {
-                        // There are no more UDP packets to read on this socket.
-                        // Process subsequent events.
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            // println!("{}: recv() would block", local_addr);
-                            break 'read;
+                        stream_map.insert_frame(&stream, frame.clone());
+
+                        log::debug!("frame rx={frame:?} off={}", tlv.off());
+
+                        match frame {
+                            quiche::h3::frame::Frame::Headers {
+                                header_block,
+                            } => {
+                                let mut qpack_decoder =
+                                    quiche::h3::qpack::Decoder::new();
+                                let headers = qpack_decoder
+                                    .decode(&header_block, u64::MAX)
+                                    .unwrap();
+                                log::trace!("hdrs={:?}", headers);
+
+                                let qlog_headers = headers
+                                    .iter()
+                                    .map(|h| qlog::events::h3::HttpHeader {
+                                        name: String::from_utf8_lossy(h.name())
+                                            .into_owned(),
+                                        value: String::from_utf8_lossy(h.value())
+                                            .into_owned(),
+                                    })
+                                    .collect();
+
+                                let frame = Http3Frame::Headers {
+                                    headers: qlog_headers,
+                                };
+
+                                if let Some(s) = qconn.qlog_streamer() {
+                                    let ev_data =
+                                        EventData::H3FrameParsed(H3FrameParsed {
+                                            stream_id: 0,
+                                            length: None,
+                                            frame,
+                                            raw: None,
+                                        });
+
+                                    s.add_event_data_now(ev_data).ok();
+                                }
+                            },
+
+                            _ => {
+                                if let Some(s) = qconn.qlog_streamer() {
+                                    let ev_data =
+                                        EventData::H3FrameParsed(H3FrameParsed {
+                                            stream_id: 0,
+                                            length: None,
+                                            frame: frame.to_qlog(),
+                                            raw: None,
+                                        });
+
+                                    s.add_event_data_now(ev_data).ok();
+                                }
+                            },
                         }
 
-                        return Err(ClientError::Other(format!(
-                            "{local_addr}: recv() failed: {e:?}"
-                        )));
-                    },
-                };
-
-                let recv_info = quiche::RecvInfo {
-                    to: local_addr,
-                    from,
-                };
-
-                // Process potentially coalesced packets.
-                let _read = match conn.recv(&mut buf[..len], recv_info) {
-                    Ok(v) => v,
-
-                    Err(e) => {
-                        println!("{}: recv failed: {:?}", local_addr, e);
-                        continue 'read;
-                    },
-                };
-
-                // println!("{}: processed {} bytes", local_addr, read);
-            }
-        }
-
-        // println!("done reading");
-
-        if conn.is_closed() {
-            println!(
-                "connection closed with error={:?}, {:?} {:?}",
-                conn.peer_error(),
-                conn.stats(),
-                conn.path_stats().collect::<Vec<quiche::PathStats>>()
-            );
-
-            if !conn.is_established() {
-                println!(
-                    "connection timed out after {:?}",
-                    app_data_start.elapsed(),
-                );
-
-                return Err(ClientError::HandshakeFail);
-            }
-
-            break;
-        }
-
-        // Create a new application protocol session once the QUIC connection is
-        // established.
-        if (conn.is_established() || conn.is_in_early_data()) &&
-            //(!args.perform_migration || migrated) &&
-            !app_proto_selected
-        {
-            app_proto_selected = true;
-        }
-
-        if app_proto_selected {
-            send_actions(&mut action_iter, &mut conn);
-
-            parse_streams(&mut conn);
-        }
-
-        // Provides as many CIDs as possible.
-        while conn.scids_left() > 0 {
-            let (scid, reset_token) = generate_cid_and_reset_token();
-
-            if conn.new_scid(&scid, reset_token, false).is_err() {
-                break;
-            }
-        }
-
-        // Generate outgoing QUIC packets and send them on the UDP socket, until
-        // quiche reports that there are no more packets to be sent.
-        let sockets = vec![&socket];
-
-        for socket in sockets {
-            let local_addr = socket.local_addr().unwrap();
-
-            for peer_addr in conn.paths_iter(local_addr) {
-                loop {
-                    let (write, send_info) = match conn.send_on_path(
-                        &mut out,
-                        Some(local_addr),
-                        Some(peer_addr),
-                    ) {
-                        Ok(v) => v,
-
-                        Err(quiche::Error::Done) => {
-                            // println!(
-                            // "{} -> {}: done writing",
-                            // local_addr,
-                            // peer_addr
-                            // );
-                            break;
-                        },
-
-                        Err(e) => {
-                            println!(
-                                "{} -> {}: send failed: {:?}",
-                                local_addr, peer_addr, e
-                            );
-
-                            conn.close(false, 0x1, b"fail").ok();
-                            break;
-                        },
-                    };
-
-                    if let Err(e) = socket.send_to(&out[..write], send_info.to) {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            println!(
-                                "{} -> {}: send() would block",
-                                local_addr, send_info.to
-                            );
+                        if tlv.off() == len {
+                            log::trace!("read all buffer");
                             break;
                         }
 
-                        return Err(ClientError::Other(format!(
-                            "{} -> {}: send() failed: {:?}",
-                            local_addr, send_info.to, e
-                        )));
+                        tlv.reset();
                     }
+                },
 
-                    // println!(
-                    // "{} -> {}: written {}",
-                    // local_addr, send_info.to, write
-                    // );
-                }
+                Err(e) => log::error!("stream read error: {e}"),
             }
         }
 
-        if conn.is_closed() {
-            println!(
-                "connection closed, {:?} {:?}",
-                conn.stats(),
-                conn.path_stats().collect::<Vec<quiche::PathStats>>()
-            );
-
-            if !conn.is_established() {
-                println!(
-                    "connection timed out after {:?}",
-                    app_data_start.elapsed(),
-                );
-
-                return Err(ClientError::HandshakeFail);
-            }
-
-            break;
-        }
-    }
-
-    Ok(())
-}
-
-/// Generate a new pair of Source Connection ID and reset token.
-pub fn generate_cid_and_reset_token() -> (quiche::ConnectionId<'static>, u128) {
-    let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut scid);
-    let scid = scid.to_vec().into();
-    let mut reset_token = [0; 16];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut reset_token);
-    let reset_token = u128::from_be_bytes(reset_token);
-    (scid, reset_token)
-}
-
-/// Makes a buffered writer for a qlog.
-pub fn make_qlog_writer(
-    dir: &std::ffi::OsStr, role: &str, id: &str,
-) -> std::io::BufWriter<std::fs::File> {
-    let mut path = std::path::PathBuf::from(dir);
-    let filename = format!("{role}-{id}.sqlog");
-    path.push(filename);
-
-    match std::fs::File::create(&path) {
-        Ok(f) => std::io::BufWriter::new(f),
-
-        Err(e) => panic!(
-            "Error creating qlog file attempted path was {:?}: {}",
-            path, e
-        ),
-    }
-}
-
-fn send_actions<'a, I>(iter: &mut I, conn: &mut quiche::Connection)
-where
-    I: Iterator<Item = &'a Action>,
-{
-    // Send actions
-    for action in iter {
-        action.execute(conn)
-    }
-}
-
-fn parse_streams(conn: &mut quiche::Connection) {
-    for stream in conn.readable() {
-        // TODO: ignoring control streams
-        if stream % 4 != 0 {
-            continue;
+        if stream_map.is_full() && self.actions_complete() {
+            let _ = self
+                .stream_map_tx
+                .take()
+                .unwrap()
+                .send(self.stream_map.take().unwrap());
         }
 
-        let mut d = [42; 16000];
+        Ok(())
+    }
 
-        match conn.stream_recv(stream, &mut d) {
-            Ok((len, _fin)) => {
-                println!("read {} stream bytes", len);
-                let mut tlv = VarintTlv::with_slice(&d[..len]).unwrap();
-                loop {
-                    // TODO:
-                    let frame_ty =
-                        tlv.ty().expect("not enough bytes to read frame type");
-                    let frame_len =
-                        tlv.len().expect("not enough bytes to read frame length");
-                    println!("tlv ty={frame_ty} len={frame_len}");
-                    let frame_val = tlv
-                        .val()
-                        .expect("not enough bytes to read frame payload");
+    fn process_writes(
+        &mut self, qconn: &mut quiche::Connection, _fresh: Option<u64>,
+    ) -> QuicResult<()> {
+        if self.actions_executed == self.actions.len() || self.sent_map() {
+            return Ok(());
+        };
 
-                    let frame = quiche::h3::frame::Frame::from_bytes(
-                        frame_ty,
-                        frame_len,
-                        frame_val.buf(),
-                    )
-                    .unwrap();
+        // TODO: skipping is currently unnecessary sine we'll only flush once. if we want to stay
+        // with single flushes, we an drop it, if we want to do multi-flushes (will require changes
+        // in h3i core) we'll have to skip up to the next flush action
+        for action in &self.actions[self.actions_executed..] {
+            let should_fire = self.should_fire();
 
-                    println!("frame rx={frame:?} off={}", tlv.off());
+            match action {
+                Action::SendFrame { stream_id, .. }
+                | Action::StreamBytes { stream_id, .. }
+                | Action::ResetStream { stream_id, .. }
+                | Action::StopSending { stream_id, .. }
+                | Action::OpenUniStream { stream_id, .. }
+                | Action::SendHeadersFrame { stream_id, .. } => {
+                    if should_fire {
+                        // Reset the fire time such that the next action will still fire.
+                        self.next_fire_time = Instant::now();
 
-                    match frame {
-                        quiche::h3::frame::Frame::Headers { header_block } => {
-                            let mut qpack_decoder =
-                                quiche::h3::qpack::Decoder::new();
-                            let headers = qpack_decoder
-                                .decode(&header_block, u64::MAX)
-                                .unwrap();
-                            println!("hdrs={:?}", headers);
+                        self.stream_map
+                            .as_mut()
+                            .expect("stream map is None")
+                            .initialize_stream(&stream_id);
 
-                            let qlog_headers = headers
-                                .iter()
-                                .map(|h| qlog::events::h3::HttpHeader {
-                                    name: String::from_utf8_lossy(h.name())
-                                        .into_owned(),
-                                    value: String::from_utf8_lossy(h.value())
-                                        .into_owned(),
-                                })
-                                .collect();
-
-                            let frame = Http3Frame::Headers {
-                                headers: qlog_headers,
-                            };
-
-                            if let Some(s) = conn.qlog_streamer() {
-                                let ev_data =
-                                    EventData::H3FrameParsed(H3FrameParsed {
-                                        stream_id: 0,
-                                        length: None,
-                                        frame,
-                                        raw: None,
-                                    });
-
-                                s.add_event_data_now(ev_data).ok();
-                            }
-                        },
-
-                        _ => {
-                            if let Some(s) = conn.qlog_streamer() {
-                                let ev_data =
-                                    EventData::H3FrameParsed(H3FrameParsed {
-                                        stream_id: 0,
-                                        length: None,
-                                        frame: frame.to_qlog(),
-                                        raw: None,
-                                    });
-
-                                s.add_event_data_now(ev_data).ok();
-                            }
-                        },
-                    }
-
-                    if tlv.off() == len {
-                        println!("read all buffer");
+                        action.execute(qconn);
+                        self.actions_executed += 1;
+                    } else {
                         break;
                     }
+                },
+                Action::Wait { duration } => {
+                    self.next_fire_time = Instant::now() + *duration;
+                    self.actions_executed += 1;
 
-                    tlv.reset();
-                }
-            },
-
-            Err(e) => println!("stream read error: {e}"),
+                    break;
+                },
+            }
         }
+
+        Ok(())
+    }
+
+    async fn wait_for_data(
+        &mut self, qconn: &mut quiche::Connection,
+    ) -> QuicResult<()> {
+        // Necessary for killing tasks when running in binary mode, since the Tokio runtime
+        // will stay alive so long as the tokio-quiche IoWorker/InboundPacketRouter lives.
+        //
+        // We can't just insta-return Ok(()) because that will starve the packet receipt arm in the
+        // IoWorker select! loop.
+        Err(std::future::poll_fn(|_| {
+            if self.sent_map() || qconn.is_closed() {
+                return Poll::Ready(Box::new(H3ConnectionError::ServerWentAway));
+            } else {
+                return Poll::Pending;
+            }
+        })
+        .await)
+    }
+
+    fn buffer(&mut self) -> &mut Pooled<ConsumeBuffer> {
+        &mut self.buffer
+    }
+}
+
+// TODO: convert this into an UnboundedReceiver that the user can poll, with perhaps the option to
+// aggregate everything into a full connection-level view.
+#[derive(Clone, Debug)]
+pub struct StreamMap {
+    inner: HashMap<u64, Vec<Frame>>,
+}
+
+impl StreamMap {
+    fn new() -> Self {
+        Self {
+            inner: HashMap::default(),
+        }
+    }
+
+    pub fn get(&self, stream_id: u64) -> Option<&Vec<Frame>> {
+        self.inner.get(&stream_id)
+    }
+
+    fn initialize_stream(&mut self, stream_id: &u64) {
+        self.inner.insert(*stream_id, vec![]);
+    }
+
+    fn insert_frame(&mut self, stream_id: &u64, frame: Frame) {
+        // Potentially initialize streams on read as well in case the server initializes a stream.
+        self.inner.entry(*stream_id).or_insert(vec![]).push(frame)
+    }
+
+    fn is_full(&self) -> bool {
+        self.inner.values().all(|v| !v.is_empty())
     }
 }

@@ -97,7 +97,6 @@ pub mod client;
 pub mod config;
 pub mod h3;
 mod tlv;
-pub mod tq_client;
 
 #[cfg(test)]
 mod tests {
@@ -106,6 +105,7 @@ mod tests {
 
     use crate::{h3::actions::Action, *};
 
+    // TODO: spin up a server. This assumes something's listening on 8085
     #[tokio::test]
     async fn test_wait() -> std::io::Result<()> {
         let config = config::AppConfig {
@@ -123,16 +123,15 @@ mod tests {
             Header::new(b":authority", b"127.0.0.1:8085"),
             Header::new(b":path", b"/"),
             Header::new(b":scheme", b"https"),
-            Header::new(b"test", b"evan"),
+            Header::new(b"test", b"header"),
         ];
         let headers1 = headers.clone();
         let header_block = encode_header_block(&headers).unwrap();
         let header_block1 = encode_header_block(&headers).unwrap();
 
-        let stream_id = 0;
         let actions = vec![
             Action::SendHeadersFrame {
-                stream_id,
+                stream_id: 0,
                 fin_stream: false,
                 headers,
                 frame: Frame::Headers { header_block },
@@ -147,8 +146,19 @@ mod tests {
             },
         ];
 
-        let frame_rx = tq_client::tq_connect(&config, actions).await;
+        let frame_rx = client::connect(&config, actions).await;
         let received_frames = frame_rx.unwrap().await.unwrap();
+
+        for id in [0, 4] {
+            let frames = received_frames.get(id).unwrap();
+            assert!(frames.iter().any(|frame| {
+                if let Frame::Headers { .. } = frame {
+                    true
+                } else {
+                    false
+                }
+            }));
+        }
 
         println!("stream_map: {:?}", received_frames);
 
