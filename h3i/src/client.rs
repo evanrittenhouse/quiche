@@ -143,7 +143,67 @@ pub async fn connect(
         "peer_addr"=>peer
     );
 
-    Ok(stream_map_rx)
+    Ok(frame_rx)
+}
+
+/// The user-facing struct which receives frames. It provides a [mpsc::UnboundedReceiver] and will
+/// be foundational to an assertion library.
+pub struct FrameRx {
+    rx: mpsc::UnboundedReceiver<StreamedFrame>,
+    conn_close_rx: mpsc::UnboundedReceiver<()>,
+    is_closed: bool,
+}
+
+impl FrameRx {
+    pub fn new(
+        rx: mpsc::UnboundedReceiver<StreamedFrame>,
+        conn_close_rx: mpsc::UnboundedReceiver<()>,
+    ) -> Self {
+        // let is_closed = Arc::new(OnceLock::new());
+        // let clone = Arc::clone(&is_closed);
+
+        // tokio::task::spawn(async move {
+        //     match conn_close_rx.recv().await {
+        //         Some(()) => {
+        //             log::info!("conn_close_rx.recv() found");
+        //             let _ = (*clone).set(());
+        //         },
+        //         _ => {},
+        //     }
+        // });
+
+        Self {
+            rx,
+            conn_close_rx,
+            is_closed: false,
+        }
+    }
+
+    pub async fn recv(&mut self) -> Option<StreamedFrame> {
+        self.rx.recv().await
+    }
+
+    pub fn is_closed(&mut self) -> bool {
+        match self.conn_close_rx.try_recv() {
+            Ok(()) => self.is_closed = true,
+            _ => {},
+        };
+
+        log::info!("{}", self.is_closed);
+        self.is_closed
+    }
+}
+
+#[derive(Debug)]
+pub struct StreamedFrame {
+    pub frame: Frame,
+    pub stream: u64,
+}
+
+impl StreamedFrame {
+    fn new(frame: Frame, stream: u64) -> Self {
+        Self { frame, stream }
+    }
 }
 
 pub struct H3iDriver {
@@ -156,6 +216,8 @@ pub struct H3iDriver {
     next_fire_time: Instant,
     /// If the [quiche::Connection] is established
     qconn_established: bool,
+    /// Sends a signal to the [FrameRx] when the underlying Quiche connection closes.
+    conn_close_tx: mpsc::UnboundedSender<()>,
 }
 
 impl H3iDriver {
@@ -366,7 +428,7 @@ impl ApplicationOverQuic for H3iDriver {
                 .send(())
                 .map_err(|e| Box::new(e) as BoxError)
         } else {
-            log::error!("connection closed without all actions getting sent");
+            log::error!("connection closed with some actions oustanding");
             // TODO: real error :)
             Err(Box::new(H3ConnectionError::ServerWentAway))
         }
@@ -380,7 +442,7 @@ impl ApplicationOverQuic for H3iDriver {
         //
         // We can't just insta-return Ok(()) because that will starve the packet receipt arm in the
         // IoWorker select! loop.
-        if Instant::now() < self.next_fire_time {
+        if !self.should_fire() {
             // We must have queued a Wait action, so let the timer expire
             tokio::time::sleep_until(self.next_fire_time).await;
             log::trace!("releasing Wait timer");
