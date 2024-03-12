@@ -103,7 +103,7 @@ mod tests {
     use tokio_quiche::quiche::h3::frame::Frame;
     use tokio_quiche::quiche::h3::Header;
 
-    use crate::{h3::actions::Action, *};
+    use crate::{client::StreamedFrame, h3::actions::Action, *};
 
     // TODO: spin up a server. This assumes something's listening on 8085
     #[tokio::test]
@@ -146,21 +146,31 @@ mod tests {
             },
         ];
 
-        let frame_rx = client::connect(&config, actions).await;
-        let received_frames = frame_rx.unwrap().await.unwrap();
+        let mut frame_rx = client::connect(&config, actions).await.unwrap();
+        let mut frames: Vec<Option<StreamedFrame>> = vec![];
+        let mut conn_closed = false;
 
-        for id in [0, 4] {
-            let frames = received_frames.get(id).unwrap();
-            assert!(frames.iter().any(|frame| {
-                if let Frame::Headers { .. } = frame {
-                    true
-                } else {
-                    false
-                }
-            }));
+        while !conn_closed {
+            let frame = frame_rx.recv().await;
+            frames.push(frame);
+
+            conn_closed = frame_rx.is_closed();
         }
 
-        println!("stream_map: {:?}", received_frames);
+        assert!(frames.iter().any(|frame| {
+            println!("{:?}", frame);
+            if let Some(StreamedFrame {
+                frame: Frame::Headers { .. },
+                ..
+            }) = frame
+            {
+                true
+            } else {
+                false
+            }
+        }));
+
+        println!("frames: {:?}", frames);
 
         Ok(())
     }

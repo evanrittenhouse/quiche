@@ -34,10 +34,14 @@ async fn main() {
         None => prompt_frames(&config),
     };
 
-    let frame_rx = h3i::client::connect(&config, frame_actions).await;
-    let received_frames = frame_rx.unwrap().await.unwrap();
+    let mut frame_rx =
+        h3i::client::connect(&config, frame_actions).await.unwrap();
 
-    log::info!("received stream map: {:?}", received_frames);
+    while !frame_rx.is_closed() {
+        if let Some(f) = frame_rx.recv().await {
+            log::info!("received frame: {:?}", f);
+        }
+    }
 }
 
 fn read_qlog(filename: &str) -> Vec<Action> {

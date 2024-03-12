@@ -6,11 +6,13 @@ use buffer_pool::Pool;
 use buffer_pool::Pooled;
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
+use std::sync::Arc;
+use std::sync::OnceLock;
 use std::task::Poll;
-use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_quiche::http3::driver::H3ConnectionError;
-use tokio_quiche::QuicResult;
+use tokio_quiche::{BoxError, QuicResult};
 
 use foundations::telemetry::log;
 use qlog::events::h3::H3FrameParsed;
@@ -41,6 +43,10 @@ pub const MAX_POOL_BUF_SIZE: usize = 64 * 1024;
 // TODO: Need to move away from the single-flush assumption (may need to rethink how StreamMap is populated and sent)
 //   - Left out because that's how h3i currently functions, though it should definitely be extended
 // TODO: would be cool to add ability to write to a PCAP
+// TODO: we are forced to wait for the 5s Quiche idle timeout to pass before the connetion closes
+//       since we're no longer just awaiting a single send. We should mimic something like
+//       H3Driver's QuicCommand to get around that
+// TODO: get rid of pools, use a single buffer in TQ?
 
 /// A generic buffer pool used to pass data around.
 pub static BUF_POOL: Pool<POOL_SHARDS, ConsumeBuffer> =
@@ -59,7 +65,7 @@ pub enum ClientError {
 /// Connect to the socket.
 pub async fn connect(
     args: &AppConfig, frame_actions: Vec<Action>,
-) -> std::result::Result<oneshot::Receiver<StreamMap>, ClientError> {
+) -> std::result::Result<FrameRx, ClientError> {
     let mut quiche_config = QConfig::new(1).unwrap();
     quiche_config.verify_peer(args.verify_peer);
     quiche_config.set_application_protos(&[b"h3"]).unwrap();
@@ -122,7 +128,7 @@ pub async fn connect(
 
     let local = socket.local_addr().unwrap();
     let peer = socket.peer_addr().unwrap();
-    let (h3i, stream_map_rx) = H3iDriver::new(frame_actions);
+    let (h3i, frame_rx) = H3iDriver::new(frame_actions);
     let _ = tokio_quiche::quic::connect_with_config(
         socket,
         Some(connect_url),
@@ -144,9 +150,8 @@ pub struct H3iDriver {
     buffer: Pooled<ConsumeBuffer>,
     actions: Vec<Action>,
     actions_executed: usize,
-    stream_map: Option<StreamMap>,
-    /// Sends the [StreamMap] back to the user on completion.
-    stream_map_tx: Option<oneshot::Sender<StreamMap>>,
+    /// Sends [StreamedFrame]s to the user-facing [FrameRx].
+    frame_tx: mpsc::UnboundedSender<StreamedFrame>,
     /// The minimum time at which the next action should fire.  
     next_fire_time: Instant,
     /// If the [quiche::Connection] is established
@@ -154,25 +159,24 @@ pub struct H3iDriver {
 }
 
 impl H3iDriver {
-    fn new(actions: Vec<Action>) -> (Self, oneshot::Receiver<StreamMap>) {
-        let (stream_map_tx, stream_map_rx) = oneshot::channel();
+    fn new(actions: Vec<Action>) -> (Self, FrameRx) {
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel();
+        let (conn_close_tx, conn_close_rx) = mpsc::unbounded_channel();
+
+        let frame_rx = FrameRx::new(frame_rx, conn_close_rx);
+
         (
             Self {
                 buffer: BUF_POOL.get_with(|d| d.expand(MAX_POOL_BUF_SIZE)),
                 actions,
                 actions_executed: 0,
-                stream_map: Some(StreamMap::new()),
-                stream_map_tx: Some(stream_map_tx),
+                frame_tx,
                 next_fire_time: Instant::now(),
                 qconn_established: false,
+                conn_close_tx,
             },
-            stream_map_rx,
+            frame_rx,
         )
-    }
-
-    /// If the [StreamMap] has been sent back to the user.
-    fn sent_map(&self) -> bool {
-        self.stream_map.is_none() || self.stream_map_tx.is_none()
     }
 
     /// If all actions have been completed.
@@ -203,12 +207,7 @@ impl ApplicationOverQuic for H3iDriver {
     fn process_reads(
         &mut self, qconn: &mut quiche::Connection,
     ) -> QuicResult<()> {
-        if self.sent_map() {
-            // If we've already sent the StreamMap to the user, we can skip all the work here
-            return Ok(());
-        }
-
-        let stream_map = self.stream_map.as_mut().unwrap();
+        log::trace!("process_reads");
 
         for stream in qconn.readable() {
             // TODO: ignoring control streams
@@ -241,7 +240,10 @@ impl ApplicationOverQuic for H3iDriver {
                         )
                         .unwrap();
 
-                        stream_map.insert_frame(&stream, frame.clone());
+                        // Send the frame back to the user-facing receiver.
+                        let _ = self
+                            .frame_tx
+                            .send(StreamedFrame::new(frame.clone(), stream));
 
                         log::debug!("frame rx={frame:?} off={}", tlv.off());
 
@@ -311,23 +313,13 @@ impl ApplicationOverQuic for H3iDriver {
             }
         }
 
-        if stream_map.is_full() && self.actions_complete() {
-            let _ = self
-                .stream_map_tx
-                .take()
-                .unwrap()
-                .send(self.stream_map.take().unwrap());
-        }
-
         Ok(())
     }
 
     fn process_writes(
         &mut self, qconn: &mut quiche::Connection, _fresh: Option<u64>,
     ) -> QuicResult<()> {
-        if self.actions_executed == self.actions.len() || self.sent_map() {
-            return Ok(());
-        };
+        log::trace!("process_writes");
 
         // TODO: skipping is currently unnecessary sine we'll only flush once. if we want to stay
         // with single flushes, we an drop it, if we want to do multi-flushes (will require changes
@@ -336,20 +328,17 @@ impl ApplicationOverQuic for H3iDriver {
             let should_fire = self.should_fire();
 
             match action {
-                Action::SendFrame { stream_id, .. }
-                | Action::StreamBytes { stream_id, .. }
-                | Action::ResetStream { stream_id, .. }
-                | Action::StopSending { stream_id, .. }
-                | Action::OpenUniStream { stream_id, .. }
-                | Action::SendHeadersFrame { stream_id, .. } => {
+                Action::SendFrame { .. }
+                | Action::StreamBytes { .. }
+                | Action::ResetStream { .. }
+                | Action::StopSending { .. }
+                | Action::OpenUniStream { .. }
+                | Action::SendHeadersFrame { .. } => {
                     if should_fire {
                         // Reset the fire time such that the next action will still fire.
                         self.next_fire_time = Instant::now();
 
-                        self.stream_map
-                            .as_mut()
-                            .expect("stream map is None")
-                            .initialize_stream(&stream_id);
+                        log::trace!("firing action: {:?}", action);
 
                         action.execute(qconn);
                         self.actions_executed += 1;
@@ -361,12 +350,26 @@ impl ApplicationOverQuic for H3iDriver {
                     self.next_fire_time = Instant::now() + *duration;
                     self.actions_executed += 1;
 
+                    log::trace!("firing wait: {:?}", duration);
+
                     break;
                 },
             }
         }
 
         Ok(())
+    }
+
+    fn on_conn_closed(&mut self) -> QuicResult<()> {
+        if self.actions_complete() {
+            self.conn_close_tx
+                .send(())
+                .map_err(|e| Box::new(e) as BoxError)
+        } else {
+            log::error!("connection closed without all actions getting sent");
+            // TODO: real error :)
+            Err(Box::new(H3ConnectionError::ServerWentAway))
+        }
     }
 
     async fn wait_for_data(
@@ -377,49 +380,27 @@ impl ApplicationOverQuic for H3iDriver {
         //
         // We can't just insta-return Ok(()) because that will starve the packet receipt arm in the
         // IoWorker select! loop.
-        Err(std::future::poll_fn(|_| {
-            if self.sent_map() || qconn.is_closed() {
-                return Poll::Ready(Box::new(H3ConnectionError::ServerWentAway));
-            } else {
-                return Poll::Pending;
-            }
-        })
-        .await)
+        if Instant::now() < self.next_fire_time {
+            // We must have queued a Wait action, so let the timer expire
+            tokio::time::sleep_until(self.next_fire_time).await;
+            log::trace!("releasing Wait timer");
+            Ok(())
+        } else {
+            Err(std::future::poll_fn(|_| {
+                if qconn.is_closed() && self.actions_complete() {
+                    // TODO: real error :)
+                    return Poll::Ready(Box::new(
+                        H3ConnectionError::ServerWentAway,
+                    ));
+                } else {
+                    return Poll::Pending;
+                }
+            })
+            .await)
+        }
     }
 
     fn buffer(&mut self) -> &mut Pooled<ConsumeBuffer> {
         &mut self.buffer
-    }
-}
-
-// TODO: convert this into an UnboundedReceiver that the user can poll, with perhaps the option to
-// aggregate everything into a full connection-level view.
-#[derive(Clone, Debug)]
-pub struct StreamMap {
-    inner: HashMap<u64, Vec<Frame>>,
-}
-
-impl StreamMap {
-    fn new() -> Self {
-        Self {
-            inner: HashMap::default(),
-        }
-    }
-
-    pub fn get(&self, stream_id: u64) -> Option<&Vec<Frame>> {
-        self.inner.get(&stream_id)
-    }
-
-    fn initialize_stream(&mut self, stream_id: &u64) {
-        self.inner.insert(*stream_id, vec![]);
-    }
-
-    fn insert_frame(&mut self, stream_id: &u64, frame: Frame) {
-        // Potentially initialize streams on read as well in case the server initializes a stream.
-        self.inner.entry(*stream_id).or_insert(vec![]).push(frame)
-    }
-
-    fn is_full(&self) -> bool {
-        self.inner.values().all(|v| !v.is_empty())
     }
 }
